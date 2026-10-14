@@ -1,4 +1,4 @@
-//! pdfcraft-js — Acrobat JavaScript for forms (L3).
+//! pdfcraft-js â€” Acrobat JavaScript for forms (L3).
 //!
 //! Field scripts (format, keystroke, validate, calculate), button actions and document-level
 //! scripts run in [boa](https://boajs.dev), a JavaScript engine written in Rust, with the subset
@@ -112,9 +112,9 @@ impl FieldState {
 /// The event a script runs for.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Event {
-    /// `Keystroke`, `Validate`, `Calculate`, `Format`, `Mouse Up`, `Open`, …
+    /// `Keystroke`, `Validate`, `Calculate`, `Format`, `Mouse Up`, `Open`, â€¦
     pub name: String,
-    /// `Field`, `Doc`, `Page`, …
+    /// `Field`, `Doc`, `Page`, â€¦
     pub kind: String,
     /// The field the event is for.
     pub target: Option<String>,
@@ -164,6 +164,8 @@ pub enum Request {
     Beep,
     /// `app.execMenuItem("SaveAs")` (XFA forms' Save buttons).
     SaveAs,
+    /// Request only: the host must obtain consent before accessing a file.
+    OpenDoc(String),
 }
 
 /// What running a script did.
@@ -258,7 +260,7 @@ impl Host {
         };
         let bytes = match &r {
             Request::Reset(names) => names.iter().fold(0usize, |n, s| n.saturating_add(s.len()).saturating_add(std::mem::size_of::<String>())),
-            Request::LaunchUrl(u) | Request::Submit(u) | Request::Focus(u) => u.len(),
+            Request::LaunchUrl(u) | Request::Submit(u) | Request::Focus(u) | Request::OpenDoc(u) => u.len(),
             _ => 0,
         };
         if self.room(bytes) {
@@ -349,7 +351,7 @@ fn colour(c: &Option<Vec<String>>, ctx: &mut Context) -> JsValue {
     }
 }
 
-// ── field objects ───────────────────────────────────────────────────────────────────────────
+// â”€â”€ field objects â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn field_index(ctx: &Context, name: &JsString) -> JsResult<usize> {
     let n = name.to_std_string_escaped();
@@ -547,7 +549,7 @@ fn field_object(ctx: &mut Context, name: &str) -> JsObject {
         .build()
 }
 
-// ── the document (global object) ────────────────────────────────────────────────────────────
+// â”€â”€ the document (global object) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn get_field(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let name = text(&arg(args, 0), ctx)?;
@@ -613,7 +615,7 @@ fn page_num_set(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
     Ok(JsValue::undefined())
 }
 
-// ── app, util, console ──────────────────────────────────────────────────────────────────────
+// â”€â”€ app, util, console â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// A message argument: a string, or an object with `cMsg`, cut to a message's length.
 fn message(v: &JsValue, key: &str, ctx: &mut Context) -> JsResult<String> {
@@ -665,7 +667,7 @@ fn timer(_: &JsValue, _: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     Ok(ObjectInitializer::new(ctx).build().into())
 }
 
-/// `util.printf(cFormat, …)`: `%[,n][+ 0#][width][.prec](d|f|s|x)`, where `,0` groups
+/// `util.printf(cFormat, â€¦)`: `%[,n][+ 0#][width][.prec](d|f|s|x)`, where `,0` groups
 /// thousands with commas (the default), `,1` doesn't, `,2` uses `.` and `,`, `,3` uses `.`
 /// without grouping.
 fn printf(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
@@ -1025,6 +1027,8 @@ fn install(ctx: &mut Context) -> JsResult<()> {
         .function(NativeFunction::from_fn_ptr(beep), js_string!("beep"), 0)
         .function(NativeFunction::from_fn_ptr(response), js_string!("response"), 1)
         .function(NativeFunction::from_fn_ptr(launch_url), js_string!("launchURL"), 2)
+        .function(NativeFunction::from_fn_ptr(popup_menu), js_string!("popUpMenuEx"), 0)
+        .function(NativeFunction::from_fn_ptr(open_doc), js_string!("openDoc"), 1)
         .function(NativeFunction::from_fn_ptr(timer), js_string!("setTimeOut"), 2)
         .function(NativeFunction::from_fn_ptr(timer), js_string!("setInterval"), 2)
         .function(NativeFunction::from_fn_ptr(noop), js_string!("clearTimeOut"), 1)
@@ -1073,7 +1077,10 @@ fn platform() -> &'static str {
 }
 
 fn event_object(ctx: &mut Context, e: &Event) -> JsObject {
-    let target = e.target.as_ref().map_or(JsValue::null(), |t| field_object(ctx, t).into());
+    let target: JsValue = match &e.target {
+        Some(t) => field_object(ctx, t).into(),
+        None => ctx.global_object().into(),
+    };
     ObjectInitializer::new(ctx)
         .property(js_string!("name"), s(&e.name), Attribute::all())
         .property(js_string!("type"), s(&e.kind), Attribute::all())
@@ -1092,7 +1099,7 @@ fn event_object(ctx: &mut Context, e: &Event) -> JsObject {
         .build()
 }
 
-// ── stack safety ────────────────────────────────────────────────────────────────────────────
+// â”€â”€ stack safety â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // boa's parser and compiler recurse once per nesting level and have no limit of their own: about
 // a hundred nested parentheses overflow a 2 MiB stack, which aborts the whole app. Scripts come
@@ -1204,7 +1211,9 @@ pub fn run(script: &str, event: &Event, doc: &DocInfo, fields: &[FieldState], do
 /// script can observe uncommitted writes. Read-only calculations avoid copying the whole form.
 pub fn run_shared(script: &str, event: &Event, doc: &DocInfo, fields: Arc<Vec<FieldState>>, doc_scripts: &[String], limits: Limits) -> Outcome {
     let failed = |why: String| Outcome { rc: true, value: event.value.clone(), change: event.change.clone(), error: Some(why), ..Default::default() };
-    if let Some(why) = std::iter::once(script).chain(doc_scripts.iter().map(String::as_str)).find_map(refuse) {
+    if let Some(why) =
+        initialization_limit(doc_scripts).or_else(|| std::iter::once(script).chain(doc_scripts.iter().map(String::as_str)).find_map(refuse))
+    {
         return failed(why);
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -1222,6 +1231,14 @@ pub fn run_shared(script: &str, event: &Event, doc: &DocInfo, fields: Arc<Vec<Fi
     }
     #[cfg(target_arch = "wasm32")]
     run_here(script, event, doc, fields, doc_scripts, limits)
+}
+
+fn initialization_limit(scripts: &[String]) -> Option<String> {
+    if scripts.len() > 1024 || scripts.iter().try_fold(0usize, |total, s| total.checked_add(s.len())).is_none_or(|total| total > 1 << 20) {
+        Some("document JavaScript initialization exceeds its limit".into())
+    } else {
+        None
+    }
 }
 
 /// Host hooks that refuse to compile code from strings (`eval`, `Function` and its generator
@@ -1257,6 +1274,9 @@ impl HostHooks for CheckedCodeFromStrings {
 }
 
 fn run_here(script: &str, event: &Event, doc: &DocInfo, fields: Arc<Vec<FieldState>>, doc_scripts: &[String], limits: Limits) -> Outcome {
+    if let Some(why) = initialization_limit(doc_scripts) {
+        return Outcome { rc: true, value: event.value.clone(), change: event.change.clone(), error: Some(why), ..Default::default() };
+    }
     let mut ctx = match Context::builder().host_hooks(std::rc::Rc::new(NoCodeFromStrings)).build() {
         Ok(ctx) => ctx,
         Err(e) => {
@@ -1281,9 +1301,12 @@ fn run_here(script: &str, event: &Event, doc: &DocInfo, fields: Arc<Vec<FieldSta
         install(&mut ctx)?;
         let ev = event_object(&mut ctx, event);
         ctx.register_global_property(js_string!("event"), ev.clone(), Attribute::all())?;
+        let open_event = event_object(&mut ctx, &Event::doc("Open"));
+        ctx.register_global_property(js_string!("event"), open_event, Attribute::all())?;
         for d in doc_scripts {
             ctx.eval(Source::from_bytes(d))?;
         }
+        ctx.register_global_property(js_string!("event"), ev.clone(), Attribute::all())?;
         let r = ctx.eval(Source::from_bytes(script))?;
         if !r.is_undefined() {
             out.result = Some(text(&r, &mut ctx)?);
@@ -1318,3 +1341,144 @@ pub mod xfa_session;
 
 #[cfg(test)]
 mod tests;
+
+/// A menu tree; the UI never evaluates script-provided text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MenuItem {
+    pub name: String,
+    pub value: String,
+    pub enabled: bool,
+    pub marked: bool,
+    pub children: Vec<MenuItem>,
+}
+
+/// UI rendezvous. Only the script worker waits for the reply.
+pub enum InteractiveEvent {
+    Menu(Vec<MenuItem>, std::sync::mpsc::Sender<Option<String>>),
+    Complete(Outcome),
+}
+thread_local! {
+    static MENU_HOST: RefCell<Option<(std::sync::mpsc::Sender<InteractiveEvent>, usize)>> = const { RefCell::new(None) };
+}
+
+fn read_menu(value: &JsValue, ctx: &mut Context, depth: usize, remaining: &mut usize) -> JsResult<MenuItem> {
+    if depth > 16 || *remaining == 0 {
+        return Err(error("popup menu exceeds its size or depth limit"));
+    }
+    *remaining -= 1;
+    let obj = value.as_object().ok_or_else(|| error("popup menu item must be an object"))?;
+    let name = text(&obj.get(js_string!("cName"), ctx)?, ctx)?;
+    let ret = obj.get(js_string!("cReturn"), ctx)?;
+    let value = if ret.is_undefined() { name.clone() } else { text(&ret, ctx)? };
+    if name.len() > 4096 || value.len() > 4096 {
+        return Err(error("popup menu text exceeds its limit"));
+    }
+    let enabled = obj.get(js_string!("bEnabled"), ctx)?;
+    let marked = obj.get(js_string!("bMarked"), ctx)?.to_boolean();
+    let sub = obj.get(js_string!("oSubMenu"), ctx)?;
+    let mut children = Vec::new();
+    if let Some(o) = sub.as_object() {
+        if o.is_array() {
+            let array = JsArray::from_object(o.clone())?;
+            let len = array.length(ctx)?;
+            if len > *remaining as u64 {
+                return Err(error("popup menu has too many entries"));
+            }
+            for i in 0..len {
+                children.push(read_menu(&array.get(i, ctx)?, ctx, depth + 1, remaining)?);
+            }
+        } else {
+            children.push(read_menu(&sub, ctx, depth + 1, remaining)?);
+        }
+    } else if !sub.is_undefined() && !sub.is_null() {
+        return Err(error("invalid popup submenu"));
+    }
+    Ok(MenuItem { name, value, enabled: enabled.is_undefined() || enabled.to_boolean(), marked, children })
+}
+
+fn popup_menu(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let mut remaining = 1024;
+    let mut items = Vec::new();
+    for arg in args {
+        items.push(read_menu(arg, ctx, 0, &mut remaining)?);
+    }
+    let sender = MENU_HOST.with(|h| {
+        let mut host = h.borrow_mut();
+        let Some((sender, count)) = host.as_mut() else { return Ok(None) };
+        if *count >= 32 {
+            return Err(error("too many popup menus in one action"));
+        }
+        *count += 1;
+        Ok(Some(sender.clone()))
+    })?;
+    let Some(sender) = sender else { return Ok(JsValue::null()) };
+    let (tx, rx) = std::sync::mpsc::channel();
+    sender.send(InteractiveEvent::Menu(items.clone(), tx)).map_err(|_| error("popup host closed"))?;
+    let selected = rx.recv_timeout(std::time::Duration::from_secs(300)).ok().flatten();
+    fn allowed(items: &[MenuItem], value: &str) -> bool {
+        items.iter().any(|i| i.enabled && i.name != "-" && (if i.children.is_empty() { i.value == value } else { allowed(&i.children, value) }))
+    }
+    match selected {
+        Some(value) if allowed(&items, &value) => Ok(s(&value)),
+        Some(_) => Err(error("invalid popup menu selection")),
+        None => Ok(JsValue::null()),
+    }
+}
+
+fn open_doc(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let arg = arg(args, 0);
+    let path = if let Some(o) = arg.as_object() {
+        let fs = o.get(js_string!("cFS"), ctx)?;
+        let base = o.get(js_string!("oDoc"), ctx)?;
+        if (!fs.is_undefined() && !text(&fs, ctx)?.is_empty()) || (!base.is_undefined() && !base.is_null()) {
+            return Err(error("openDoc supports only the current document's local file system"));
+        }
+        text(&o.get(js_string!("cPath"), ctx)?, ctx)?
+    } else {
+        if !superfluous_open_arguments(args) {
+            return Err(error("unsupported openDoc options"));
+        }
+        text(&arg, ctx)?
+    };
+    if path.is_empty() || path.len() > 4096 {
+        return Err(error("invalid openDoc path"));
+    }
+    host(ctx)?.borrow_mut().request(Request::OpenDoc(path));
+    // A document object cannot be returned before host consent. Fail closed when used as one.
+    Ok(JsValue::null())
+}
+
+/// Start a bounded script on a worker. Dropping the receiver cancels menu waits.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn interactive(
+    script: String,
+    event: Event,
+    doc: DocInfo,
+    fields: Vec<FieldState>,
+    doc_scripts: Vec<String>,
+) -> Result<std::sync::mpsc::Receiver<InteractiveEvent>, String> {
+    if let Some(why) =
+        initialization_limit(&doc_scripts).or_else(|| std::iter::once(script.as_str()).chain(doc_scripts.iter().map(String::as_str)).find_map(refuse))
+    {
+        return Err(why);
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("pdfcraft-js-interactive".into())
+        .stack_size(SCRIPT_STACK)
+        .spawn(move || {
+            MENU_HOST.with(|h| *h.borrow_mut() = Some((tx.clone(), 0)));
+            let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_here(&script, &event, &doc, Arc::new(fields), &doc_scripts, Limits::default())
+            }))
+            .unwrap_or_else(|_| Outcome { error: Some("script worker failed".into()), ..Default::default() });
+            MENU_HOST.with(|h| *h.borrow_mut() = None);
+            let _ = tx.send(InteractiveEvent::Complete(out));
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(rx)
+}
+
+fn superfluous_open_arguments(args: &[JsValue]) -> bool {
+    args.iter().skip(1).all(|v| v.is_undefined() || v.is_null())
+}

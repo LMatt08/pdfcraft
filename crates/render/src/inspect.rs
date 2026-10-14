@@ -317,6 +317,8 @@ pub enum LinkTarget {
     /// A destination in this document: the 0-based page and where on it the view goes.
     Page(usize, DestView),
     Uri(String),
+    /// Source of a JavaScript action, decoded with a bounded stream reader.
+    JavaScript(String),
     /// A set-layer-visibility action (`SetOCGState`, ISO 32000-2 §12.6.4.13): each change in
     /// order, naming the layer by its optional content group. With `preserve_rb`, a layer turned
     /// on turns off the other layers of its radio-button groups.
@@ -1257,6 +1259,9 @@ impl<'a> Inspector<'a> {
         // Once the comment budget is spent, comments are no longer built, but links and attachments
         // are still listed.
         let mut comments_full = false;
+        // Shared JavaScript actions have a separate source budget from link text.
+        let mut javascript_remaining = 4 << 20;
+        let mut javascript_limit_reported = false;
         for (id, page) in pages {
             let Ok(page_dict) = self.doc.get_dictionary(id) else { continue };
             if let Ok(annots) = page_dict.get(b"Annots")
@@ -1281,9 +1286,19 @@ impl<'a> Inspector<'a> {
                     info.attachments.push(self.attachment(fs, AttachmentSource::Annotation { page, index }, text_budget, fallback));
                 }
                 if subtype == "Link" {
-                    if let Some(link) = self.link(page, index, d, text_budget) {
-                        if matches!(&link.target, LinkTarget::Other(s) if s == "JavaScript") {
+                    if let Some(link) = self.link(page, index, d, text_budget, &mut javascript_remaining) {
+                        if matches!(&link.target, LinkTarget::JavaScript(_)) || matches!(&link.target, LinkTarget::Other(s) if s == "JavaScript") {
                             info.has_javascript = true;
+                        }
+                        if javascript_remaining == 0
+                            && matches!(&link.target, LinkTarget::Other(s) if s == "JavaScript")
+                            && !javascript_limit_reported
+                        {
+                            info.warnings.push(
+                                "Link JavaScript sources reached the 4 MiB document inspection limit; remaining JavaScript actions are unavailable."
+                                    .into(),
+                            );
+                            javascript_limit_reported = true;
                         }
                         info.links.push(link);
                     }
@@ -1369,7 +1384,7 @@ impl<'a> Inspector<'a> {
         info.annotations.sort_by(|a, b| a.page.cmp(&b.page).then(b.rect[3].total_cmp(&a.rect[3])));
     }
 
-    fn link(&self, page: usize, index: usize, d: &Dictionary, text_budget: &mut usize) -> Option<Link> {
+    fn link(&self, page: usize, index: usize, d: &Dictionary, text_budget: &mut usize, javascript_remaining: &mut usize) -> Option<Link> {
         let rect = rect4(self.resolve(d.get(b"Rect").ok()?));
         let target = if let Ok(dest) = d.get(b"Dest") {
             let (page, view) = self.dest(dest, 0)?;
@@ -1391,6 +1406,28 @@ impl<'a> Inspector<'a> {
                 Some("SetOCGState") => self.layer_state(a),
                 Some("GoToR") => self.remote_go_to(a).unwrap_or_else(|| LinkTarget::Other("GoToR".into())),
                 Some("Launch") => self.launch_pdf(a).unwrap_or_else(|| LinkTarget::Other("Launch".into())),
+                Some("JavaScript") => a
+                    .get(b"JS")
+                    .ok()
+                    .and_then(|js| {
+                        if *javascript_remaining == 0 {
+                            return None;
+                        }
+                        const LIMIT: usize = 256 << 10;
+                        let bytes = match self.resolve(js) {
+                            Object::String(bytes, _) if bytes.len() <= LIMIT => bytes.clone(),
+                            Object::Stream(stream) => stream.decompressed_content_with_limit(LIMIT).ok()?,
+                            _ => return None,
+                        };
+                        let source = pdfcraft_cos::PdfString::literal(bytes).to_text();
+                        let Some(remaining) = javascript_remaining.checked_sub(source.len()) else {
+                            *javascript_remaining = 0;
+                            return None;
+                        };
+                        *javascript_remaining = remaining;
+                        Some(LinkTarget::JavaScript(source))
+                    })
+                    .unwrap_or_else(|| LinkTarget::Other("JavaScript".into())),
                 Some(other) => LinkTarget::Other(other.to_string()),
                 None => return None,
             }
@@ -3996,5 +4033,108 @@ mod open_action_javascript_tests {
         let bytes = pdf_with_open_action(b"<< /S /GoTo /D [3 0 R /Fit] >>");
         let info = inspect(Arc::new(bytes), None).expect("inspects");
         assert!(!info.has_javascript, "a /GoTo /OpenAction is not JavaScript");
+    }
+}
+
+#[cfg(test)]
+mod javascript_links_tests {
+    use super::*;
+    use lopdf::dictionary;
+
+    #[test]
+    fn shared_javascript_actions_have_a_document_wide_source_budget() {
+        let mut d = Document::with_version("1.7");
+        let pages = d.new_object_id();
+        let page = d.new_object_id();
+        let action = d.add_object(dictionary! { "S" => "JavaScript", "JS" => Object::string_literal(vec![b'x'; 256 << 10]) });
+        let annotation = d
+            .add_object(dictionary! { "Type" => "Annot", "Subtype" => "Link", "Rect" => vec![0.into(),0.into(),50.into(),50.into()], "A" => action });
+        let ordinary = d.add_object(dictionary! { "Subtype" => "Link", "Rect" => vec![0.into(),0.into(),50.into(),50.into()], "Dest" => vec![Object::Reference(page), Object::Name(b"Fit".to_vec())] });
+        let mut annots = vec![Object::Reference(annotation); 33];
+        annots.push(Object::Reference(ordinary));
+        d.objects.insert(page, dictionary! { "Type" => "Page", "Parent" => pages, "Annots" => annots }.into());
+        d.objects.insert(
+            pages,
+            dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1, "MediaBox" => vec![0.into(),0.into(),200.into(),200.into()] }
+                .into(),
+        );
+        let root = d.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        d.trailer.set("Root", root);
+        let mut bytes = Vec::new();
+        d.save_to(&mut bytes).unwrap();
+        let info = inspect(Arc::new(bytes), None).unwrap();
+        assert_eq!(info.links.len(), 34, "the resource limit must not drop annotations");
+        assert!(info.has_javascript);
+        let total: usize = info
+            .links
+            .iter()
+            .map(|link| match &link.target {
+                LinkTarget::JavaScript(source) => source.len(),
+                _ => 0,
+            })
+            .sum();
+        assert!(total <= 4 << 20, "shared action sources expanded to {total} bytes");
+        assert!(matches!(&info.links[0].target, LinkTarget::JavaScript(_)));
+        assert!(matches!(&info.links[32].target, LinkTarget::Other(kind) if kind == "JavaScript"));
+        assert!(matches!(&info.links[33].target, LinkTarget::Page(0, _)), "ordinary links after the limit must still resolve");
+        assert_eq!(info.warnings.iter().filter(|warning| warning.contains("4 MiB")).count(), 1);
+    }
+
+    #[test]
+    fn javascript_link_sources_direct_indirect_stream_and_utf16() {
+        for storage in 0..7 {
+            let mut d = Document::with_version("1.7");
+            let pages = d.new_object_id();
+            let source = "app.alert('é');";
+            let string = if storage == 3 {
+                {
+                    let mut bytes = vec![0xfe, 0xff];
+                    for unit in source.encode_utf16() {
+                        bytes.extend_from_slice(&unit.to_be_bytes());
+                    }
+                    Object::String(bytes, lopdf::StringFormat::Hexadecimal)
+                }
+            } else {
+                Object::string_literal(source)
+            };
+            let js = match storage {
+                1 => Object::Reference(d.add_object(string)),
+                2 => {
+                    let mut stream = lopdf::Stream::new(dictionary! {}, source.as_bytes().to_vec());
+                    stream.compress().unwrap();
+                    Object::Reference(d.add_object(stream))
+                }
+                4 => {
+                    let cycle = d.new_object_id();
+                    d.objects.insert(cycle, Object::Reference(cycle));
+                    Object::Reference(cycle)
+                }
+                5 => {
+                    let mut stream = lopdf::Stream::new(dictionary! {}, vec![b'x'; 300 << 10]);
+                    stream.compress().unwrap();
+                    Object::Reference(d.add_object(stream))
+                }
+                6 => Object::Integer(42),
+                _ => string,
+            };
+            let action = d.add_object(dictionary! { "S" => "JavaScript", "JS" => js });
+            let annotation = d.add_object(
+                dictionary! { "Type" => "Annot", "Subtype" => "Link", "Rect" => vec![0.into(),0.into(),50.into(),50.into()], "A" => action },
+            );
+            let page = d.add_object(dictionary! { "Type" => "Page", "Parent" => pages, "Annots" => vec![annotation.into()] });
+            d.objects.insert(pages, dictionary!{ "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1, "MediaBox" => vec![0.into(),0.into(),200.into(),200.into()] }.into());
+            let root = d.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+            d.trailer.set("Root", root);
+            let mut bytes = Vec::new();
+            d.save_to(&mut bytes).unwrap();
+            let info = inspect(Arc::new(bytes), None).unwrap();
+            assert!(info.has_javascript);
+            if storage >= 4 {
+                assert!(matches!(&info.links[0].target, LinkTarget::Other(kind) if kind == "JavaScript"));
+                continue;
+            }
+            let LinkTarget::JavaScript(script) = &info.links[0].target else { panic!("missing source") };
+            assert_eq!(script, source);
+        }
     }
 }
