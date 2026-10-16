@@ -3421,6 +3421,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             // Overlapping widgets paint in order, so the topmost badge owns the hover; an
             // earlier link or annotation hover still wins over any badge.
             if hover_text.is_none() {
+                // A validation verdict is an ordinary tip, including during JavaScript menus.
                 hover_text = badge_hover.take().map(|(pos, text)| (pos, text, false));
             }
         }
