@@ -42,6 +42,7 @@ JavaScript annotation hover tips disappear in the activation frame and stay hidd
 that interaction is running or queued, including between popup replies. Ordinary link and
 comment tips remain available. Canvas hover tips are pointer-transparent, so their current
 or previous-frame rectangles cannot intercept clicks intended for a menu or the document.
+Signature validation badge tips also remain available during a JavaScript menu interaction.
 
 An outside press cancels the old interaction without consuming the pointer event: the canvas,
 another annotation or an interface control receives that same press/release. Another link starts

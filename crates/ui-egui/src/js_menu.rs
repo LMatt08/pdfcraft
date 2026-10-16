@@ -963,6 +963,54 @@ mod tests {
     }
 
     #[test]
+    fn signature_badge_tooltip_survives_javascript_menu_interactions() {
+        let mut cos = pdfcraft_cos::Document::open(std::sync::Arc::new(second_link(fixture()))).unwrap();
+        let root = cos.root().unwrap();
+        let mut catalog = cos.get(root).as_dict().unwrap().clone();
+        let pages = cos.resolve(catalog.get(b"Pages").unwrap());
+        let kids = cos.resolve(pages.as_dict().unwrap().get(b"Kids").unwrap());
+        let page = kids.as_array().unwrap()[0].as_ref().unwrap();
+        let mut widget = Dict::new();
+        widget.set(b"Subtype".to_vec(), Object::Name(b"Widget".to_vec()));
+        widget.set(b"FT".to_vec(), Object::Name(b"Sig".to_vec()));
+        widget.set(b"T".to_vec(), Object::String(PdfString::text("Synthetic signature")));
+        widget.set(b"Rect".to_vec(), Object::Array(vec![Object::Int(130), Object::Int(120), Object::Int(170), Object::Int(160)]));
+        widget.set(b"P".to_vec(), Object::Ref(page));
+        // A deliberately invalid synthetic signature still has a visible validation badge.
+        widget.set(b"V".to_vec(), Object::Dict(Dict::new()));
+        let widget = cos.add(widget);
+        let mut page_dict = cos.get(page).as_dict().unwrap().clone();
+        let mut annotations = page_dict.get(b"Annots").unwrap().as_array().unwrap().clone();
+        annotations.push(Object::Ref(widget));
+        page_dict.set(b"Annots".to_vec(), Object::Array(annotations));
+        cos.set(page, page_dict);
+        let mut form = Dict::new();
+        form.set(b"Fields".to_vec(), Object::Array(vec![Object::Ref(widget)]));
+        catalog.set(b"AcroForm".to_vec(), Object::Dict(form));
+        cos.set(root, catalog);
+        let bytes = pdfcraft_cos::write_incremental(&cos, &Default::default()).unwrap();
+        let mut h = read_harness(bytes, 1.0, "100%");
+        let id = h.state().active_ids().unwrap().1;
+        let signature = &h.state().session.get(id).unwrap().signatures[0];
+        assert!(signature.signed && signature.visible);
+        let summary = signature.summary();
+        for menu_open in [false, true, false] {
+            if menu_open {
+                let source = at(&h, 60.0, 60.0);
+                h.state_mut().run_link_script_at(id, 0, 0, source, None);
+                wait(&mut h, ready_menu);
+            } else if h.state().link_script.active.is_some() {
+                h.key_press(egui::Key::Escape);
+                h.step();
+            }
+            h.hover_at(at(&h, 150.0, 140.0));
+            h.run_steps(3);
+            assert!(painted_text(&h, summary).is_some(), "signature verdict must remain visible, menu_open={menu_open}");
+            assert_eq!(ready_menu(h.state()), menu_open);
+        }
+    }
+
+    #[test]
     fn themes_and_outside_scroll_zoom_and_focus_loss_keep_document_interactions_available() {
         let mut h = harness();
         let id = h.state().active_ids().unwrap().1;

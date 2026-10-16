@@ -85,10 +85,6 @@ and add a line to the [progress log](#progress-log); when a gap closes, remove i
 
 ## Headline numbers
 
-The breadth figures below are the 2026-10-10 snapshot documented in
-[target-app-parity.md](docs/target-app-parity.md#how-this-was-measured). Run `cargo xtask parity`
-for current checklist counts; readiness and effort remain estimates.
-
 | | Value | Kind |
 |---|---|---|
 | **Feature breadth** | **≈ 67%** tier-weighted (56.9% unweighted: 423 shipped + 74 partial of 808; P0 94.2%) | measured, `parity/acrobat-features.toml` |
