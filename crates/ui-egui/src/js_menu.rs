@@ -13,6 +13,10 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 const MAX_WORKERS: usize = 3;
 
 #[cfg(not(target_arch = "wasm32"))]
+const MENU_KEYS: [egui::Key; 6] =
+    [egui::Key::ArrowDown, egui::Key::ArrowUp, egui::Key::ArrowLeft, egui::Key::ArrowRight, egui::Key::Enter, egui::Key::Space];
+
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Copy, PartialEq)]
 struct ViewStamp {
     page: usize,
@@ -142,6 +146,32 @@ fn current(app: &PdfCraftApp, pending: &Pending) -> bool {
 }
 
 impl PdfCraftApp {
+    /// Reserve menu keys before document shortcuts run, even before an item has focus.
+    /// Outside interactions keep their normal shortcuts and cancel the menu in the UI pass.
+    pub(crate) fn link_script_owns_key(&self, ctx: &egui::Context) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.link_script.active.as_ref().is_some_and(|job| {
+                job.phase == JobPhase::AwaitingChoice
+                    && !self.palette_open
+                    && current(self, &job.pending)
+                    && (job.pending.frame == Some(ctx.cumulative_frame_nr()) || !job.popup.outside_interaction(ctx))
+                    && ctx.input(|i| {
+                        i.focused
+                            && i.events.iter().any(|e| {
+                                matches!(e, egui::Event::Key { key, pressed: true, modifiers, .. }
+                                if modifiers.matches_logically(egui::Modifiers::NONE) && (*key == egui::Key::Escape || MENU_KEYS.contains(key)))
+                            })
+                    })
+            })
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = ctx;
+            false
+        }
+    }
+
     /// Include queued/running actions, but not retired workers whose results are discarded.
     pub(crate) fn link_script_interaction_active(&self) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
@@ -423,9 +453,12 @@ impl MenuView {
             let inside = i.pointer.interact_pos().is_some_and(|p| self.rects.iter().any(|r| r.contains(p)));
             // Smoothed scroll deltas can outlive a wheel event. A fresh annotation click must
             // not be cancelled by the tail of an earlier document scroll animation.
-            let wheel = i.events.iter().any(|e| matches!(e, egui::Event::MouseWheel { .. }));
+            // Document shortcuts run in App::logic before this UI pass and can consume
+            // events. Their arrival must still dismiss the menu after the command runs.
+            let wheel = i.raw.events.iter().any(|e| matches!(e, egui::Event::MouseWheel { .. }));
             ((!inside) && (i.pointer.any_pressed() || i.pointer.any_click() || wheel || i.zoom_delta() != 1.0))
-                || i.events
+                || i.raw
+                    .events
                     .iter()
                     .any(|e| matches!(e, egui::Event::Key { pressed: true, modifiers, key, .. } if modifiers.command || *key == egui::Key::Tab))
         })
@@ -477,7 +510,7 @@ impl MenuView {
         if ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO || i.smooth_scroll_delta() != egui::Vec2::ZERO) {
             self.keyboard = None;
         }
-        for key in [egui::Key::ArrowDown, egui::Key::ArrowUp, egui::Key::ArrowLeft, egui::Key::ArrowRight, egui::Key::Enter, egui::Key::Space] {
+        for key in MENU_KEYS {
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
                 // egui determined a spatial focus direction at begin_pass, before we consumed
                 // the key. Our menu owns arrow navigation; do not move focus again at end_pass.
@@ -960,6 +993,48 @@ mod tests {
         wait(&mut h, |a| a.link_script.is_none());
         assert!(h.state().js_console.log.iter().any(|s| s == "result Label only"));
         assert_eq!(h.state().views[0].current, 0);
+    }
+
+    #[test]
+    fn review_first_menu_arrow_does_not_navigate_the_document() {
+        let mut h = scripted_harness("app.popUpMenuEx({cName:'Group',oSubMenu:{cName:'Child'}});");
+        assert!(h.state().link_script.active.as_ref().unwrap().popup.keyboard.is_none());
+        println!("FIRST_ARROW focused={:?} wants_keyboard={}", h.ctx.memory(|m| m.focused()), h.ctx.egui_wants_keyboard_input());
+        h.key_press(egui::Key::ArrowRight);
+        h.step();
+        assert_eq!(h.state().views[0].current, 0, "the first menu arrow must not turn the source page");
+        assert!(ready_menu(h.state()), "the first arrow must keep the waiting menu active");
+        assert_eq!(h.state().link_script.active.as_ref().unwrap().popup.keyboard, Some(vec![0, 0]));
+    }
+
+    #[test]
+    fn review_first_menu_escape_preserves_fullscreen() {
+        let mut h = scripted_harness("app.popUpMenuEx({cName:'Group',oSubMenu:{cName:'Child'}});");
+        h.key_press(egui::Key::Escape);
+        h.step();
+        h.state_mut().apply_full_screen(true);
+        h.run_steps(3);
+        let id = h.state().active_ids().unwrap().1;
+        h.state_mut().run_link_script(id, 0, 0);
+        wait(&mut h, ready_menu);
+        assert!(h.state().full_screen);
+        h.key_press(egui::Key::Escape);
+        h.step();
+        assert!(h.state().full_screen, "Escape belongs to the waiting menu before fullscreen navigation");
+        assert!(h.state().link_script.is_none());
+    }
+
+    #[test]
+    fn review_menu_keeps_outside_command_keys_available() {
+        let mut h = scripted_harness("app.popUpMenuEx({cName:'Group',oSubMenu:{cName:'Child'}});");
+        // A command in the same frame cancels the menu instead of losing the document input.
+        for (key, modifiers) in [(egui::Key::ArrowDown, egui::Modifiers::NONE), (egui::Key::F, egui::Modifiers::COMMAND)] {
+            h.event(egui::Event::Key { key, modifiers, physical_key: None, pressed: true, repeat: false });
+        }
+        h.step();
+        assert!(h.state().views[0].find.is_some(), "the document Find shortcut must remain available");
+        assert!(h.state().link_script.is_none());
+        assert!(!h.state().session.get(h.state().views[0].id).unwrap().dirty);
     }
 
     #[test]

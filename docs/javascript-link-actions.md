@@ -63,7 +63,11 @@ and generation checks. Frame identity prevents multi-pass layout from starting a
 
 At most three live execution channels are retained. If all slots are occupied, the latest
 activation waits for a bounded worker to finish. Logical polling does not paint or consume keys;
-the UI pass alone draws and handles menu input. Closing/switching documents, editing or disabling
+the UI pass alone draws and handles menu input. Before document shortcuts, a read-only
+ownership check reserves the waiting menu's arrows, Enter, Space and Escape, even before any
+item gains keyboard focus. Outside interactions retain their normal document shortcuts;
+menu cancellation observes raw events even when those shortcuts have consumed them.
+Closing/switching documents, editing or disabling
 JavaScript invalidates accepted results as well as waiting menus. While awaiting a choice, view
 changes, another dialog, loss of focus, outside scrolling, Tab and command shortcuts cancel the
 interaction. Menu scrolling stays inside the menu; outside events remain available to the reader.
