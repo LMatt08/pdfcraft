@@ -129,5 +129,9 @@ without opening a target file. `PDFCRAFT_SHOT` and `PDFCRAFT_MENU_SHOTS` optiona
 synthetic test renders. The contributor reports successful Windows testing with a KiCad 10 PDF before the rebase.
 Headless renders do not replace native validation of the rebased build.
 
+The 2026-10-23 rebase passed 2,698 targeted tests. An isolated portable Windows run also
+verified annotation activation, the live JavaScript popup, the Next choice, navigation to page 2
+and normal exit through the opt-in UI control channel, using a contributor-original synthetic PDF.
+
 Public API behavior source: [Acrobat JavaScript API Reference](https://opensource.adobe.com/dc-acrobat-sdk-docs/library/jsapiref/JS_API_AcroJS.html#popupmenuex).
 No implementation code or assets from Adobe products were used.

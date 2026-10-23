@@ -1,6 +1,6 @@
 # PdfCraft roadmap
 
-> **Last updated:** 2026-10-23 · **Change:** minor (PR #2081 rebased onto cf0f8060; JavaScript link menus retained; estimates unchanged)
+> **Last updated:** 2026-10-23 · **Change:** minor (PR #2081 rebased onto aea5e78e; JavaScript link menus retained; estimates unchanged)
 **Stage: alpha** · next: beta, ~25% (ready for real work 50% → 75%) and ~400–700 h away
 
 > **Last reviewed:** 2026-10-22 · **Last updated:** 2026-10-22 · **Change:** minor (M14, #3558: rebase guarded macOS per-file association recovery onto current main; estimates unchanged)
@@ -192,7 +192,7 @@ Ranked; detail and the full milestone table in [docs/roadmap.md](docs/roadmap.md
 
 ## Progress log
 
-- **2026-10-23 (M6, PR #2081):** Rebased JavaScript link actions and native menus onto main `cf0f8060`, retaining upstream script guards, form snapshot sharing, annotation budgets and viewer interactions. See [JavaScript link actions](docs/javascript-link-actions.md); estimates unchanged.
+- **2026-10-23 (M6, PR #2081):** Rebased JavaScript link actions and native menus onto main `aea5e78e`, retaining upstream script guards, form snapshot sharing, annotation budgets and viewer interactions. See [JavaScript link actions](docs/javascript-link-actions.md). All 2,698 targeted tests pass; estimates unchanged.
 - **2026-10-22 (M4, #3916 partial):** Document edits and Undo/Redo cancel an Organize page drag. Pointer-release regressions check exact page order and save/reopen.
 - **2026-10-22 (M14, macOS association recovery candidate):** Successful desktop open/save/sign can queue recovery of an existing per-file binding to the running PDFCraft bundle through NSWorkspace. Metadata-only watcher changes retain undo and avoid false overwrite prompts; real same-length/same-mtime edits remain protected. Rebased on 0.12.0 and reuses #3042's shared atomic metadata preservation; the bounded recovery parser does not narrow save limits. Prior native Preview TEST-signature and Finder workflows passed on macOS 27.0.1; other versions remain unqualified. Estimates unchanged.
 - **2026-10-13 (M7, free image rotation):** A selected page image has a rotate knob (Shift: 15 degree steps) and `image_edit` a `rotate_by` action; the angle is written as one undoable `cm`. Snapping to page edges while moving is in #1740; resize snapping is not done. Estimates unchanged.

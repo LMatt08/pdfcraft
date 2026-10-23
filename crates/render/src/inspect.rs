@@ -4047,10 +4047,16 @@ mod javascript_links_tests {
         let pages = d.new_object_id();
         let page = d.new_object_id();
         let action = d.add_object(dictionary! { "S" => "JavaScript", "JS" => Object::string_literal(vec![b'x'; 256 << 10]) });
-        let annotation = d
-            .add_object(dictionary! { "Type" => "Annot", "Subtype" => "Link", "Rect" => vec![0.into(),0.into(),50.into(),50.into()], "A" => action });
+        // Distinct annotations share the action: repeated references to the same annotation
+        // are intentionally deduplicated by inspection before the source budget is charged.
+        let mut annots: Vec<_> = (0..33)
+            .map(|_| {
+                Object::Reference(d.add_object(
+                    dictionary! { "Type" => "Annot", "Subtype" => "Link", "Rect" => vec![0.into(),0.into(),50.into(),50.into()], "A" => action },
+                ))
+            })
+            .collect();
         let ordinary = d.add_object(dictionary! { "Subtype" => "Link", "Rect" => vec![0.into(),0.into(),50.into(),50.into()], "Dest" => vec![Object::Reference(page), Object::Name(b"Fit".to_vec())] });
-        let mut annots = vec![Object::Reference(annotation); 33];
         annots.push(Object::Reference(ordinary));
         d.objects.insert(page, dictionary! { "Type" => "Page", "Parent" => pages, "Annots" => annots }.into());
         d.objects.insert(

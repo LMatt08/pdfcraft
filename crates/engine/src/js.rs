@@ -434,71 +434,6 @@ impl Session {
     }
 }
 
-#[cfg(test)]
-mod review_tests {
-    use super::*;
-
-    /// A long run of underscores (a form's blank) is read in one pass: each glyph is compared with
-    /// the word so far without reading the word again.
-    #[test]
-    fn a_long_underscore_run_is_read_in_one_pass() {
-        let n = 10_000;
-        let glyph = |i: usize, t: &str| pdfcraft_render::TextGlyph {
-            text: t.into(),
-            rect: [i as f32, 0.0, i as f32 + 1.0, 10.0],
-            quad: [[0.0; 2]; 4],
-            direction: [1.0, 0.0],
-        };
-        let mut glyphs: Vec<_> = (0..n).map(|i| glyph(i, "_")).collect();
-        glyphs.push(glyph(n, "x"));
-        let text = pdfcraft_render::PageText { line_of: vec![0; glyphs.len()], space_before: vec![false; glyphs.len()], glyphs };
-        UNDERSCORE_CHARS_READ.with(|c| c.set(0));
-        let words = words_with(&text, |x, y| [x, y]);
-        assert_eq!(words.iter().map(|(w, _)| w.len()).collect::<Vec<_>>(), [n, 1]);
-        let read = UNDERSCORE_CHARS_READ.with(std::cell::Cell::get);
-        assert!(read <= 4 * n, "{read} characters read for {n} glyphs");
-    }
-
-    #[test]
-    fn duplicate_field_names_diff_against_first_original() {
-        let first = pdfcraft_js::FieldState::new("duplicate", pdfcraft_js::FieldType::Text, vec!["first".into()]);
-        let mut second = first.clone();
-        second.value = vec!["second".into()];
-        second.display = pdfcraft_js::DISPLAY_HIDDEN;
-        let before = vec![first.clone(), second.clone()];
-        assert!(changes(&before, std::slice::from_ref(&first)).is_empty());
-        let actual = changes(&before, std::slice::from_ref(&second));
-        assert_eq!(
-            actual,
-            vec![FieldChange {
-                name: "duplicate".into(),
-                value: Some(second.value),
-                display: Some(pdfcraft_js::DISPLAY_HIDDEN),
-                ..Default::default()
-            }]
-        );
-        let outcome = pdfcraft_js::run_shared(
-            "event.value = getField('duplicate').value; getField('duplicate').value = 'updated';",
-            &pdfcraft_js::Event::field("Calculate", "duplicate", ""),
-            &pdfcraft_js::DocInfo::default(),
-            std::sync::Arc::new(before.clone()),
-            &[],
-            Limits::default(),
-        );
-        assert_eq!(outcome.error, None);
-        assert_eq!(outcome.value, "first");
-        assert_eq!(outcome.changed.len(), 1);
-        assert_eq!(
-            changes(&before, &outcome.changed),
-            vec![FieldChange { name: "duplicate".into(), value: Some(vec!["updated".into()]), ..Default::default() }]
-        );
-        assert!(changes(&before, &[]).is_empty());
-        let mut missing = first;
-        missing.name = "missing".into();
-        assert!(changes(&before, &[missing]).is_empty());
-    }
-}
-
 pub use pdfcraft_js::{InteractiveEvent, MenuItem};
 
 /// Immutable input for an annotation action. No files or UI are accessed by the worker.
@@ -604,4 +539,69 @@ pub fn resolve_javascript_document_path(source: Option<&std::path::Path>, raw: &
     #[cfg(windows)]
     let raw = normalized.as_deref().unwrap_or(raw);
     crate::resolve_remote_document_path(source, raw)
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+
+    /// A long run of underscores (a form's blank) is read in one pass: each glyph is compared with
+    /// the word so far without reading the word again.
+    #[test]
+    fn a_long_underscore_run_is_read_in_one_pass() {
+        let n = 10_000;
+        let glyph = |i: usize, t: &str| pdfcraft_render::TextGlyph {
+            text: t.into(),
+            rect: [i as f32, 0.0, i as f32 + 1.0, 10.0],
+            quad: [[0.0; 2]; 4],
+            direction: [1.0, 0.0],
+        };
+        let mut glyphs: Vec<_> = (0..n).map(|i| glyph(i, "_")).collect();
+        glyphs.push(glyph(n, "x"));
+        let text = pdfcraft_render::PageText { line_of: vec![0; glyphs.len()], space_before: vec![false; glyphs.len()], glyphs };
+        UNDERSCORE_CHARS_READ.with(|c| c.set(0));
+        let words = words_with(&text, |x, y| [x, y]);
+        assert_eq!(words.iter().map(|(w, _)| w.len()).collect::<Vec<_>>(), [n, 1]);
+        let read = UNDERSCORE_CHARS_READ.with(std::cell::Cell::get);
+        assert!(read <= 4 * n, "{read} characters read for {n} glyphs");
+    }
+
+    #[test]
+    fn duplicate_field_names_diff_against_first_original() {
+        let first = pdfcraft_js::FieldState::new("duplicate", pdfcraft_js::FieldType::Text, vec!["first".into()]);
+        let mut second = first.clone();
+        second.value = vec!["second".into()];
+        second.display = pdfcraft_js::DISPLAY_HIDDEN;
+        let before = vec![first.clone(), second.clone()];
+        assert!(changes(&before, std::slice::from_ref(&first)).is_empty());
+        let actual = changes(&before, std::slice::from_ref(&second));
+        assert_eq!(
+            actual,
+            vec![FieldChange {
+                name: "duplicate".into(),
+                value: Some(second.value),
+                display: Some(pdfcraft_js::DISPLAY_HIDDEN),
+                ..Default::default()
+            }]
+        );
+        let outcome = pdfcraft_js::run_shared(
+            "event.value = getField('duplicate').value; getField('duplicate').value = 'updated';",
+            &pdfcraft_js::Event::field("Calculate", "duplicate", ""),
+            &pdfcraft_js::DocInfo::default(),
+            std::sync::Arc::new(before.clone()),
+            &[],
+            Limits::default(),
+        );
+        assert_eq!(outcome.error, None);
+        assert_eq!(outcome.value, "first");
+        assert_eq!(outcome.changed.len(), 1);
+        assert_eq!(
+            changes(&before, &outcome.changed),
+            vec![FieldChange { name: "duplicate".into(), value: Some(vec!["updated".into()]), ..Default::default() }]
+        );
+        assert!(changes(&before, &[]).is_empty());
+        let mut missing = first;
+        missing.name = "missing".into();
+        assert!(changes(&before, &[missing]).is_empty());
+    }
 }

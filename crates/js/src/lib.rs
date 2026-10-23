@@ -1,4 +1,4 @@
-//! pdfcraft-js â€” Acrobat JavaScript for forms (L3).
+//! pdfcraft-js — Acrobat JavaScript for forms (L3).
 //!
 //! Field scripts (format, keystroke, validate, calculate), button actions and document-level
 //! scripts run in [boa](https://boajs.dev), a JavaScript engine written in Rust, with the subset
@@ -112,9 +112,9 @@ impl FieldState {
 /// The event a script runs for.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Event {
-    /// `Keystroke`, `Validate`, `Calculate`, `Format`, `Mouse Up`, `Open`, â€¦
+    /// `Keystroke`, `Validate`, `Calculate`, `Format`, `Mouse Up`, `Open`, …
     pub name: String,
-    /// `Field`, `Doc`, `Page`, â€¦
+    /// `Field`, `Doc`, `Page`, …
     pub kind: String,
     /// The field the event is for.
     pub target: Option<String>,
@@ -351,7 +351,7 @@ fn colour(c: &Option<Vec<String>>, ctx: &mut Context) -> JsValue {
     }
 }
 
-// â”€â”€ field objects â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── field objects ───────────────────────────────────────────────────────────────────────────
 
 fn field_index(ctx: &Context, name: &JsString) -> JsResult<usize> {
     let n = name.to_std_string_escaped();
@@ -549,7 +549,7 @@ fn field_object(ctx: &mut Context, name: &str) -> JsObject {
         .build()
 }
 
-// â”€â”€ the document (global object) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── the document (global object) ────────────────────────────────────────────────────────────
 
 fn get_field(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let name = text(&arg(args, 0), ctx)?;
@@ -615,7 +615,7 @@ fn page_num_set(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
     Ok(JsValue::undefined())
 }
 
-// â”€â”€ app, util, console â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── app, util, console ──────────────────────────────────────────────────────────────────────
 
 /// A message argument: a string, or an object with `cMsg`, cut to a message's length.
 fn message(v: &JsValue, key: &str, ctx: &mut Context) -> JsResult<String> {
@@ -667,7 +667,7 @@ fn timer(_: &JsValue, _: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     Ok(ObjectInitializer::new(ctx).build().into())
 }
 
-/// `util.printf(cFormat, â€¦)`: `%[,n][+ 0#][width][.prec](d|f|s|x)`, where `,0` groups
+/// `util.printf(cFormat, …)`: `%[,n][+ 0#][width][.prec](d|f|s|x)`, where `,0` groups
 /// thousands with commas (the default), `,1` doesn't, `,2` uses `.` and `,`, `,3` uses `.`
 /// without grouping.
 fn printf(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
@@ -1099,7 +1099,7 @@ fn event_object(ctx: &mut Context, e: &Event) -> JsObject {
         .build()
 }
 
-// â”€â”€ stack safety â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── stack safety ────────────────────────────────────────────────────────────────────────────
 //
 // boa's parser and compiler recurse once per nesting level and have no limit of their own: about
 // a hundred nested parentheses overflow a 2 MiB stack, which aborts the whole app. Scripts come
