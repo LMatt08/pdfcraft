@@ -638,6 +638,33 @@ fn inspect_structure(info: &mut DocInfo, fill: impl FnOnce(&mut DocInfo) -> Resu
     }
 }
 
+#[derive(Default)]
+struct RejectedJavaScript {
+    identities: std::collections::HashSet<*const lopdf::Stream>,
+    order: std::collections::VecDeque<*const lopdf::Stream>,
+}
+
+impl RejectedJavaScript {
+    const CAPACITY: usize = 4096;
+
+    fn contains(&self, identity: *const lopdf::Stream) -> bool {
+        self.identities.contains(&identity)
+    }
+
+    fn insert(&mut self, identity: *const lopdf::Stream) {
+        if self.identities.contains(&identity) {
+            return;
+        }
+        if self.order.len() >= Self::CAPACITY
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.identities.remove(&oldest);
+        }
+        self.identities.insert(identity);
+        self.order.push_back(identity);
+    }
+}
+
 struct Inspector<'a> {
     doc: &'a dyn Structure,
     page_ids: Vec<ObjectId>,
@@ -1261,6 +1288,9 @@ impl<'a> Inspector<'a> {
         let mut comments_full = false;
         // Shared JavaScript actions have a separate source budget from link text.
         let mut javascript_remaining = 4 << 20;
+        // Per-inspection negative cache: identity is the resolved stream, not the
+        // annotation/action that refers to it. FIFO eviction bounds retained identities.
+        let mut rejected_javascript = RejectedJavaScript::default();
         let mut javascript_limit_reported = false;
         for (id, page) in pages {
             let Ok(page_dict) = self.doc.get_dictionary(id) else { continue };
@@ -1286,7 +1316,7 @@ impl<'a> Inspector<'a> {
                     info.attachments.push(self.attachment(fs, AttachmentSource::Annotation { page, index }, text_budget, fallback));
                 }
                 if subtype == "Link" {
-                    if let Some(link) = self.link(page, index, d, text_budget, &mut javascript_remaining) {
+                    if let Some(link) = self.link(page, index, d, text_budget, &mut javascript_remaining, &mut rejected_javascript) {
                         if matches!(&link.target, LinkTarget::JavaScript(_)) || matches!(&link.target, LinkTarget::Other(s) if s == "JavaScript") {
                             info.has_javascript = true;
                         }
@@ -1384,7 +1414,15 @@ impl<'a> Inspector<'a> {
         info.annotations.sort_by(|a, b| a.page.cmp(&b.page).then(b.rect[3].total_cmp(&a.rect[3])));
     }
 
-    fn link(&self, page: usize, index: usize, d: &Dictionary, text_budget: &mut usize, javascript_remaining: &mut usize) -> Option<Link> {
+    fn link(
+        &self,
+        page: usize,
+        index: usize,
+        d: &Dictionary,
+        text_budget: &mut usize,
+        javascript_remaining: &mut usize,
+        rejected_javascript: &mut RejectedJavaScript,
+    ) -> Option<Link> {
         let rect = rect4(self.resolve(d.get(b"Rect").ok()?));
         let target = if let Ok(dest) = d.get(b"Dest") {
             let (page, view) = self.dest(dest, 0)?;
@@ -1416,7 +1454,24 @@ impl<'a> Inspector<'a> {
                         const LIMIT: usize = 256 << 10;
                         let bytes = match self.resolve(js) {
                             Object::String(bytes, _) if bytes.len() <= LIMIT => bytes.clone(),
-                            Object::Stream(stream) => stream.decompressed_content_with_limit(LIMIT).ok()?,
+                            Object::Stream(stream) => {
+                                // Structure returns stable references throughout this inspection.
+                                // A resolved object address also identifies direct streams without
+                                // conflating distinct actions or aliases to an indirect stream.
+                                let identity = std::ptr::from_ref(stream);
+                                if rejected_javascript.contains(identity) {
+                                    return None;
+                                }
+                                #[cfg(test)]
+                                JS_DECODE_COUNT.with(|n| n.set(n.get() + 1));
+                                match stream.decompressed_content_with_limit(LIMIT) {
+                                    Ok(bytes) => bytes,
+                                    Err(_) => {
+                                        rejected_javascript.insert(identity);
+                                        return None;
+                                    }
+                                }
+                            }
                             _ => return None,
                         };
                         let source = pdfcraft_cos::PdfString::literal(bytes).to_text();
@@ -4141,6 +4196,89 @@ mod javascript_links_tests {
             }
             let LinkTarget::JavaScript(script) = &info.links[0].target else { panic!("missing source") };
             assert_eq!(script, source);
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! { static JS_DECODE_COUNT: std::cell::Cell<usize> = const {std::cell::Cell::new(0)}; }
+
+#[cfg(test)]
+mod remediation_probes {
+    use super::*;
+    use lopdf::dictionary;
+    #[test]
+    fn remediation_rejected_stream_cache_has_a_fixed_bound() {
+        let streams: Vec<_> = (0..8192).map(|_| lopdf::Stream::new(dictionary! {}, vec![])).collect();
+        let mut cache = RejectedJavaScript::default();
+        for stream in &streams {
+            cache.insert(std::ptr::from_ref(stream));
+            assert!(cache.identities.len() <= 4096);
+            assert!(cache.order.len() <= 4096);
+        }
+        assert!(!cache.contains(std::ptr::from_ref(streams.first().unwrap())));
+        assert!(cache.contains(std::ptr::from_ref(streams.last().unwrap())));
+    }
+    fn shared_bad_stream(n: usize, repeated_annotation: bool) -> Vec<u8> {
+        let mut d = Document::with_version("1.7");
+        let pages = d.new_object_id();
+        let mut stream = lopdf::Stream::new(dictionary! {}, vec![b'x'; 300 << 10]);
+        stream.compress().unwrap();
+        let stream_id = d.add_object(stream);
+        let action = d.add_object(dictionary! {"S"=>"JavaScript","JS"=>stream_id});
+        let mut annots = Vec::new();
+        let mut first = None;
+        for _ in 0..n {
+            let annotation_action = if n == 33 {
+                let alias = d.add_object(Object::Reference(stream_id));
+                d.add_object(dictionary! {"S"=>"JavaScript","JS"=>alias})
+            } else {
+                action
+            };
+            let id = if let Some(id) = first.filter(|_| repeated_annotation) {
+                id
+            } else {
+                let id = d.add_object(
+                    dictionary! {"Type"=>"Annot","Subtype"=>"Link","Rect"=>vec![0.into(),0.into(),50.into(),50.into()],"A"=>annotation_action},
+                );
+                first = Some(id);
+                id
+            };
+            annots.push(Object::Reference(id));
+        }
+        let good=d.add_object(dictionary!{"Subtype"=>"Link","Rect"=>vec![0.into(),0.into(),50.into(),50.into()],"A"=>dictionary!{"S"=>"JavaScript","JS"=>Object::string_literal("console.println('valid');")}});
+        annots.push(good.into());
+        let page = d.add_object(dictionary! {"Type"=>"Page","Parent"=>pages,"Annots"=>annots});
+        d.objects.insert(
+            pages,
+            dictionary! {"Type"=>"Pages","Kids"=>vec![page.into()],"Count"=>1,"MediaBox"=>vec![0.into(),0.into(),200.into(),200.into()]}.into(),
+        );
+        let root = d.add_object(dictionary! {"Type"=>"Catalog","Pages"=>pages});
+        d.trailer.set("Root", root);
+        let mut bytes = Vec::new();
+        d.save_to(&mut bytes).unwrap();
+        bytes
+    }
+    #[test]
+    fn remediation_rejected_stream_decode_is_cached_and_preserves_budget() {
+        for (n, repeated) in [(1, false), (33, false), (256, false), (1024, false), (1024, true)] {
+            let bytes = shared_bad_stream(n, repeated);
+            let len = bytes.len();
+
+            let mut times = Vec::new();
+            let mut calls = 0;
+            for _ in 0..3 {
+                JS_DECODE_COUNT.with(|n| n.set(0));
+                let now = std::time::Instant::now();
+                let info = inspect(Arc::new(bytes.clone()), None).unwrap();
+                times.push(now.elapsed().as_micros());
+                calls = JS_DECODE_COUNT.with(|n| n.get());
+                assert_eq!(calls, 1);
+                assert_eq!(info.links.len(), if repeated { 2 } else { n + 1 });
+                assert!(matches!(&info.links.last().unwrap().target,LinkTarget::JavaScript(s) if s=="console.println('valid');"));
+                assert!(!info.warnings.iter().any(|w| w.contains("4 MiB")));
+            }
+            println!("REJECT n={n} repeated_annotation={repeated} bytes={len} decode_calls={calls} micros={times:?}");
         }
     }
 }

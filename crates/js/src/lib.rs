@@ -1076,10 +1076,11 @@ fn platform() -> &'static str {
     }
 }
 
-fn event_object(ctx: &mut Context, e: &Event) -> JsObject {
+fn event_object(ctx: &mut Context, e: &Event, document_target: bool) -> JsObject {
     let target: JsValue = match &e.target {
         Some(t) => field_object(ctx, t).into(),
-        None => ctx.global_object().into(),
+        None if document_target => ctx.global_object().into(),
+        None => JsValue::null(),
     };
     ObjectInitializer::new(ctx)
         .property(js_string!("name"), s(&e.name), Attribute::all())
@@ -1299,14 +1300,22 @@ fn run_here(script: &str, event: &Event, doc: &DocInfo, fields: Arc<Vec<FieldSta
     let mut out = Outcome { rc: true, value: event.value.clone(), change: event.change.clone(), ..Default::default() };
     let result = (|| -> JsResult<()> {
         install(&mut ctx)?;
-        let ev = event_object(&mut ctx, event);
-        ctx.register_global_property(js_string!("event"), ev.clone(), Attribute::all())?;
-        let open_event = event_object(&mut ctx, &Event::doc("Open"));
-        ctx.register_global_property(js_string!("event"), open_event, Attribute::all())?;
+        // Link actions have their own document initialization contract. Existing field,
+        // button and console callers initialize under their actual event, not a synthetic Open.
+        let link = event.kind == "Link";
+        let ev = event_object(&mut ctx, event, link);
+        // The Link target is the document/global object. Keeping its event binding
+        // non-enumerable avoids a global -> event -> target cycle during serialization.
+        let event_attributes = if link { Attribute::WRITABLE | Attribute::CONFIGURABLE } else { Attribute::all() };
+        ctx.register_global_property(js_string!("event"), ev.clone(), event_attributes)?;
+        if link {
+            let open_event = event_object(&mut ctx, &Event::doc("Open"), true);
+            ctx.register_global_property(js_string!("event"), open_event, event_attributes)?;
+        }
         for d in doc_scripts {
             ctx.eval(Source::from_bytes(d))?;
         }
-        ctx.register_global_property(js_string!("event"), ev.clone(), Attribute::all())?;
+        ctx.register_global_property(js_string!("event"), ev.clone(), event_attributes)?;
         let r = ctx.eval(Source::from_bytes(script))?;
         if !r.is_undefined() {
             out.result = Some(text(&r, &mut ctx)?);

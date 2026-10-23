@@ -1,6 +1,6 @@
 # PdfCraft roadmap
 
-> **Last updated:** 2026-10-23 · **Change:** minor (PR #2081 rebased onto aea5e78e; JavaScript link menus retained; estimates unchanged)
+> **Last updated:** 2026-10-24 · **Change:** minor (PR #2081 local audit remediation; estimates unchanged)
 **Stage: alpha** · next: beta, ~25% (ready for real work 50% → 75%) and ~400–700 h away
 
 > **Last reviewed:** 2026-10-22 · **Last updated:** 2026-10-22 · **Change:** minor (M14, #3558: rebase guarded macOS per-file association recovery onto current main; estimates unchanged)
@@ -191,6 +191,8 @@ Ranked; detail and the full milestone table in [docs/roadmap.md](docs/roadmap.md
 | 8 | 1.0 polish: performance, right-to-left, missing languages, keyboard-only (M14) | 55–95 |
 
 ## Progress log
+
+- **2026-10-24 (M6, PR #2081 local remediation):** Preserve accepted menu completions while retaining document invalidation; isolate Link initialization from existing events; correct MCP destructive metadata and cache rejected stream decodes. Add discriminating menu and lifecycle regressions. Estimates unchanged.
 
 - **2026-10-23 (M6, PR #2081):** Rebased JavaScript link actions and native menus onto main `aea5e78e`, retaining upstream script guards, form snapshot sharing, annotation budgets and viewer interactions. See [JavaScript link actions](docs/javascript-link-actions.md). All 2,698 targeted tests pass; estimates unchanged.
 - **2026-10-22 (M4, #3916 partial):** Document edits and Undo/Redo cancel an Organize page drag. Pointer-release regressions check exact page order and save/reopen.
@@ -642,6 +644,7 @@ Newest first: the date, what moved, and the new overall estimate.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | M6, PR #2081 local audit remediation: accepted menu results, event compatibility, MCP metadata and bounded rejection cache. Estimates unchanged. |
 | 2026-10-22 | minor | M4, #3916 partial: document edits and Undo/Redo cancel Organize drags. Pointer-release and save/reopen regressions check page order. Estimates unchanged. |
 | 2026-10-20 | minor | M4: initial-view window and interface options resolve indirect boolean ViewerPreferences values; synthetic true/false and save/reopen regressions retain defaults for malformed entries. Estimates unchanged. |
 | 2026-10-20 | minor | M6, #3502: form detection preserves comments across content streams; estimates unchanged. |

@@ -3328,6 +3328,7 @@ impl eframe::App for PdfCraftApp {
             ctx.request_repaint();
             return;
         }
+        self.show_link_script(&ctx);
         for view in &mut self.views {
             view.begin_render_frame();
         }

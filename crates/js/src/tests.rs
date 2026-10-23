@@ -1493,14 +1493,14 @@ fn popup_cancellation_and_link_document_target() {
 fn document_initialization_uses_open_event() {
     let o = run(
         "console.println(event.type + ':' + event.name)",
-        &Event::doc("Console"),
+        &Event { kind: "Link".into(), ..Event::doc("Mouse Up") },
         &doc(),
         &[],
         &["if (event.name !== 'Open' || event.target !== this) throw Error('initialization'); var ready=1;".into()],
         Limits::default(),
     );
     assert_eq!(o.error, None);
-    assert_eq!(o.console, ["Doc:Console"]);
+    assert_eq!(o.console, ["Link:Mouse Up"]);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1547,4 +1547,73 @@ fn initialization_aggregate_limit_preserves_field_value() {
     assert!(o.error.is_some());
     assert_eq!(o.value, "17");
     assert!(o.rc);
+}
+
+#[test]
+fn remediation_finite_menu_depth_boundary() {
+    for (depth, rejected) in [(16, false), (17, true)] {
+        let script = format!("var a={{cName:'leaf'}};for(var i=0;i<{depth};i++)a={{cName:'parent',oSubMenu:a}};app.popUpMenuEx(a)");
+        let o = run(&script, &Event::doc("Console"), &DocInfo::default(), &[], &[], Limits::default());
+        println!("DEPTH {depth} error={:?}", o.error);
+        assert_eq!(o.error.is_some(), rejected, "finite tree below the node cap must test depth independently");
+    }
+}
+
+#[test]
+fn remediation_existing_events_keep_their_context_and_saved_fields() {
+    let fields = vec![FieldState::new("price", FieldType::Text, vec!["17".into()])];
+    for event in [
+        Event::doc("Console"),
+        Event::doc("WillSave"),
+        Event::field("Calculate", "price", "17"),
+        Event::field("Validate", "price", "17"),
+        Event::field("Mouse Up", "price", "17"),
+    ] {
+        let init = "if(event.name==='Open')getField('price').value='0';var count=1;var serialized=JSON.stringify(event);";
+        let out = run(
+            "if(!Object.prototype.propertyIsEnumerable.call(this,'event'))throw Error('legacy binding');count++;console.println(count);console.println(event.type+':'+event.name);event.value='done'",
+            &event,
+            &doc(),
+            &fields,
+            &[init.into()],
+            Limits::default(),
+        );
+        assert_eq!(out.error, None, "{event:?}");
+        assert!(out.changed.is_empty(), "non-Open initializer changed saved fields: {event:?}");
+        assert_eq!(out.console, ["2".to_owned(), format!("{}:{}", event.kind, event.name)]);
+        assert_eq!(out.value, "done");
+    }
+    let open = run(
+        "console.println(count)",
+        &Event::doc("Open"),
+        &doc(),
+        &fields,
+        &["if(event.name==='Open')getField('price').value='0';var count=1;".into()],
+        Limits::default(),
+    );
+    assert_eq!(open.error, None);
+    assert_eq!(open.console, ["1"]);
+    assert_eq!(open.changed.len(), 1);
+    assert_eq!(open.changed[0].value, ["0"]);
+    for name in ["Console", "Open", "WillSave"] {
+        let out = run("JSON.stringify(event)", &Event::doc(name), &doc(), &[], &[], Limits::default());
+        assert_eq!(out.error, None, "{name}");
+        assert!(out.result.unwrap().contains(name));
+    }
+}
+
+#[test]
+fn remediation_link_initialization_and_target_are_serializable() {
+    let event = Event { kind: "Link".into(), ..Event::doc("Mouse Up") };
+    let init = "if(event.type!=='Doc'||event.name!=='Open'||event.target!==this)throw Error('init');JSON.stringify(event);var initialized=1;";
+    let out = run(
+        "JSON.stringify(event);if(event.target!==this)throw Error('target');initialized++;console.println(initialized);console.println(event.type+':'+event.name)",
+        &event,
+        &doc(),
+        &[],
+        &[init.into()],
+        Limits::default(),
+    );
+    assert_eq!(out.error, None);
+    assert_eq!(out.console, ["2", "Link:Mouse Up"]);
 }

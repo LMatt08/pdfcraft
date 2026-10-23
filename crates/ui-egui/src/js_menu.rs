@@ -20,6 +20,8 @@ struct ViewStamp {
     rotation: u16,
     fit: crate::canvas::Fit,
     layout: crate::canvas::PageLayout,
+    continuous: bool,
+    show_page_gaps: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -33,6 +35,14 @@ struct Pending {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JobPhase {
+    Running,
+    AwaitingChoice,
+    Accepted,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct LinkJob {
     pending: Pending,
     events: Receiver<InteractiveEvent>,
@@ -40,6 +50,7 @@ pub(crate) struct LinkJob {
     popup: MenuView,
     serial: u64,
     popup_number: usize,
+    phase: JobPhase,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -100,21 +111,34 @@ impl LinkMenus {
         serde_json::json!({ "doc": pending.input.document_id().0, "page": pending.page.saturating_add(1),
             "index": pending.annotation.saturating_add(1), "anchor": [pending.anchor.x, pending.anchor.y],
             "rects": popup.map(|p| p.rects.iter().map(|r| [r.min.x, r.min.y, r.max.x, r.max.y]).collect::<Vec<_>>()).unwrap_or_default(),
-            "sequence": serial, "pending": self.pending.is_some(), "workers": self.retired.len() + usize::from(self.active.is_some()) })
+            "phase": self.active.as_ref().map(|job| match job.phase {
+                JobPhase::Running => "running", JobPhase::AwaitingChoice => "awaiting_choice", JobPhase::Accepted => "accepted",
+            }).unwrap_or("queued"), "sequence": serial, "pending": self.pending.is_some(), "workers": self.retired.len() + usize::from(self.active.is_some()) })
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn stamp(app: &PdfCraftApp, id: DocId) -> Option<ViewStamp> {
     let view = app.views.iter().find(|v| v.id == id)?;
-    Some(ViewStamp { page: view.current, zoom: view.zoom, rotation: view.rotation, fit: view.fit, layout: view.layout })
+    Some(ViewStamp {
+        page: view.current,
+        zoom: view.zoom,
+        rotation: view.rotation,
+        fit: view.fit,
+        layout: view.layout,
+        continuous: view.continuous,
+        show_page_gaps: view.show_page_gaps,
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn document_current(app: &PdfCraftApp, pending: &Pending) -> bool {
+    app.active_ids().is_some_and(|(_, id)| id == pending.input.document_id()) && app.session.link_javascript_is_current(&pending.input)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn current(app: &PdfCraftApp, pending: &Pending) -> bool {
-    app.active_ids().is_some_and(|(_, id)| id == pending.input.document_id())
-        && app.session.link_javascript_is_current(&pending.input)
-        && stamp(app, pending.input.document_id()) == Some(pending.stamp)
+    document_current(app, pending) && stamp(app, pending.input.document_id()) == Some(pending.stamp)
 }
 
 impl PdfCraftApp {
@@ -142,7 +166,11 @@ impl PdfCraftApp {
                 self.link_script.last_activation = Some(key);
             }
             let mut state = std::mem::take(&mut self.link_script);
-            if let Some(job) = state.active.take() {
+            // A new activation can replace a waiting menu, but must not discard an
+            // already accepted action. Queue the latest activation until that action finishes.
+            if state.active.as_ref().is_some_and(|job| job.phase != JobPhase::Accepted)
+                && let Some(job) = state.active.take()
+            {
                 state.retire(job, None);
             }
             state.pending = None;
@@ -183,7 +211,15 @@ impl PdfCraftApp {
                 Ok(events) => {
                     // Internal UI identity, independent of document input; wrap cannot panic.
                     state.serial = state.serial.wrapping_add(1);
-                    state.active = Some(LinkJob { pending, events, menu: None, popup: MenuView::default(), serial: state.serial, popup_number: 0 });
+                    state.active = Some(LinkJob {
+                        pending,
+                        events,
+                        menu: None,
+                        popup: MenuView::default(),
+                        serial: state.serial,
+                        popup_number: 0,
+                        phase: JobPhase::Running,
+                    });
                 }
                 Err(e) => self.notify_error(e),
             }
@@ -195,27 +231,47 @@ impl PdfCraftApp {
         {
             let mut state = std::mem::take(&mut self.link_script);
             state.reap();
-            if state.pending.as_ref().is_some_and(|p| !current(self, p) || self.modal_open() || self.palette_open) {
+            if state.pending.as_ref().is_some_and(|p| !current(self, p) || self.modal_open() || self.palette_open || !ctx.input(|i| i.raw.focused)) {
                 state.pending = None;
             }
             if let Some(mut job) = state.active.take() {
-                let same_frame = job.pending.frame == Some(ctx.cumulative_frame_nr());
-                let dismiss = !current(self, &job.pending)
-                    || self.modal_open()
-                    || self.palette_open
-                    || !ctx.input(|i| i.focused)
-                    || (!same_frame && job.popup.outside_interaction(ctx));
-                let escape = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
-                if dismiss || escape {
+                // Logical polling never paints or consumes UI events. Raw focus is updated
+                // even by egui's hidden-window run_logic; processed input may still be stale.
+                let invalid = !document_current(self, &job.pending)
+                    || (job.phase != JobPhase::Accepted
+                        && (!current(self, &job.pending) || self.modal_open() || self.palette_open || !ctx.input(|i| i.raw.focused)));
+                if invalid {
                     state.retire(job, Some(ctx));
                 } else {
                     let mut complete = false;
+                    let mut cancelled = false;
                     match job.events.try_recv() {
+                        Ok(InteractiveEvent::Menu(_, reply)) if job.phase == JobPhase::AwaitingChoice => {
+                            // Advancing to another menu without a UI reply means the previous
+                            // wait expired. Retire the whole unchosen action, including both replies.
+                            let _ = reply.send(None);
+                            cancelled = true;
+                        }
                         Ok(InteractiveEvent::Menu(items, reply)) => {
+                            // A view change during accepted execution does not invalidate the
+                            // document. A subsequent menu starts a new geometry-sensitive wait.
+                            if let Some(stamp) = stamp(self, job.pending.input.document_id()) {
+                                job.pending.stamp = stamp;
+                            }
                             job.popup.release_focus(ctx);
                             job.popup = MenuView::default();
                             job.popup_number = job.popup_number.saturating_add(1);
                             job.menu = Some((items, reply));
+                            job.phase = JobPhase::AwaitingChoice;
+                        }
+                        Ok(InteractiveEvent::Complete(_)) if job.phase == JobPhase::AwaitingChoice => {
+                            // The host reply can time out before the UI accepts a choice.
+                            // Completing that null continuation must not commit an unchosen action.
+                            job.popup.release_focus(ctx);
+                            if let Some((_, reply)) = job.menu.take() {
+                                let _ = reply.send(None);
+                            }
+                            complete = true;
                         }
                         Ok(InteractiveEvent::Complete(out)) => {
                             job.popup.release_focus(ctx);
@@ -247,17 +303,9 @@ impl PdfCraftApp {
                         }
                         Err(TryRecvError::Empty) => {}
                     }
-                    if !complete {
-                        if let Some((items, reply)) = job.menu.take() {
-                            let id = egui::Id::new(("pdf-js-menu", job.serial, job.popup_number));
-                            match job.popup.show(ctx, id, job.pending.anchor, &items) {
-                                Some(choice) => {
-                                    let _ = reply.send(choice);
-                                    job.popup.release_focus(ctx);
-                                }
-                                None => job.menu = Some((items, reply)),
-                            }
-                        }
+                    if cancelled {
+                        state.retire(job, Some(ctx));
+                    } else if !complete {
                         state.active = Some(job);
                     }
                 }
@@ -265,6 +313,58 @@ impl PdfCraftApp {
             self.start_pending_menu(&mut state);
             if state.active.is_some() || state.pending.is_some() || !state.retired.is_empty() {
                 ctx.request_repaint_after(std::time::Duration::from_millis(16));
+            }
+            self.link_script = state;
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = ctx;
+    }
+
+    /// Paint and handle current-pass input only from App::ui. Completion removes the
+    /// active job; cancellation retires its receiver and never applies its later results.
+    pub(crate) fn show_link_script(&mut self, ctx: &egui::Context) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut state = std::mem::take(&mut self.link_script);
+            if let Some(mut job) = state.active.take() {
+                if job.phase == JobPhase::Accepted {
+                    state.active = Some(job);
+                } else {
+                    let same_frame = job.pending.frame == Some(ctx.cumulative_frame_nr());
+                    let dismiss = !current(self, &job.pending)
+                        || self.modal_open()
+                        || self.palette_open
+                        || !ctx.input(|i| i.focused)
+                        || (!same_frame && job.popup.outside_interaction(ctx));
+                    let escape = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+                    if dismiss || escape {
+                        state.retire(job, Some(ctx));
+                    } else if let Some((items, reply)) = job.menu.take() {
+                        let id = egui::Id::new(("pdf-js-menu", job.serial, job.popup_number));
+                        match job.popup.show(ctx, id, job.pending.anchor, &items) {
+                            Some(Some(choice)) => {
+                                if reply.send(Some(choice)).is_ok() {
+                                    job.phase = JobPhase::Accepted;
+                                    job.popup.release_focus(ctx);
+                                    job.popup.rects.clear();
+                                    state.active = Some(job);
+                                } else {
+                                    state.retire(job, Some(ctx));
+                                }
+                            }
+                            Some(None) => {
+                                let _ = reply.send(None);
+                                state.retire(job, Some(ctx));
+                            }
+                            None => {
+                                job.menu = Some((items, reply));
+                                state.active = Some(job);
+                            }
+                        }
+                    } else {
+                        state.active = Some(job);
+                    }
+                }
             }
             self.link_script = state;
         }
@@ -1045,5 +1145,340 @@ mod tests {
         h.step();
         assert!(h.state().link_script.is_none());
         assert!(!h.state().session.get(id).unwrap().dirty);
+    }
+    // Independent verification: controlled channels fix event order; real poll/show/retire/reap.
+    fn remediation_controlled_job(
+        h: &mut Harness<'static, PdfCraftApp>,
+    ) -> (std::sync::mpsc::Sender<InteractiveEvent>, std::sync::mpsc::Receiver<Option<String>>) {
+        let id = h.state().active_ids().unwrap().1;
+        h.state_mut()
+            .session
+            .apply(
+                id,
+                pdfcraft_engine::Edit::AddField {
+                    page: 0,
+                    rect: [110.0, 110.0, 200.0, 130.0],
+                    kind: pdfcraft_engine::NewField::Text { multiline: false },
+                    name: Some("price".into()),
+                },
+            )
+            .unwrap();
+        h.state_mut()
+            .session
+            .apply(id, pdfcraft_engine::Edit::SetFieldValue { name: "price".into(), value: pdfcraft_engine::FieldValue::Text("17".into()) })
+            .unwrap();
+        h.state_mut().run_link_script(id, 0, 0);
+        wait(h, ready_menu);
+        let (reply, selected) = std::sync::mpsc::channel();
+        let (complete, events) = std::sync::mpsc::channel();
+        let job = h.state_mut().link_script.active.as_mut().unwrap();
+        job.menu.as_mut().unwrap().1 = reply;
+        job.events = events;
+        (complete, selected)
+    }
+    fn remediation_outcome(h: &Harness<'static, PdfCraftApp>) -> pdfcraft_engine::js::Outcome {
+        let doc = h.state().session.get(h.state().views[0].id).unwrap();
+        let cos = pdfcraft_cos::Document::open(doc.bytes.clone()).unwrap();
+        let mut field = pdfcraft_engine::js::field_state(&cos, doc.form.iter().find(|f| f.name == "price").unwrap());
+        field.value = vec!["99".into()];
+        pdfcraft_engine::js::Outcome {
+            rc: true,
+            changed: vec![field],
+            console: vec!["verified completion".into()],
+            alerts: vec!["verified alert".into()],
+            requests: vec![
+                pdfcraft_engine::js::Request::GoToPage(1),
+                pdfcraft_engine::js::Request::OpenDoc("C:/synthetic/other.pdf".into()),
+                pdfcraft_engine::js::Request::LaunchUrl("https://example.org/verify".into()),
+            ],
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn remediation_cancellation_order_matrix() {
+        for scenario in [
+            "before-choice",
+            "focus-after-choice",
+            "outside-after-choice",
+            "document-switch",
+            "document-edit",
+            "complete-first",
+            "complete-queued-with-dismiss",
+            "escape-after-choice",
+            "zoom-after-choice",
+            "page-after-choice",
+        ] {
+            let mut h = harness();
+            let (complete, selected) = remediation_controlled_job(&mut h);
+            if scenario != "before-choice" {
+                h.get_by_label("Next").click();
+                wait(&mut h, |a| a.link_script.active.as_ref().is_some_and(|j| j.menu.is_none()));
+                assert_eq!(selected.recv_timeout(std::time::Duration::from_secs(1)).unwrap().as_deref(), Some("next"));
+            }
+            let before = h.state().js_console.log.len();
+            h.state_mut().toast = None;
+            let undo_before = h.state().session.get(h.state().views[0].id).unwrap().can_undo().map(str::to_owned);
+            if scenario.starts_with("complete-") {
+                complete.send(InteractiveEvent::Complete(remediation_outcome(&h))).unwrap();
+            }
+            match scenario {
+                "before-choice" | "focus-after-choice" | "complete-queued-with-dismiss" => {
+                    h.input_mut().focused = false;
+                    h.event(egui::Event::WindowFocused(false));
+                    h.step();
+                }
+                "outside-after-choice" => click_at(&mut h, egui::pos2(1100.0, 700.0)),
+                "document-switch" => {
+                    h.state_mut().open_bytes("other.pdf", None, fixture()).unwrap();
+                    wait(&mut h, |a| a.views.len() == 2);
+                    h.step();
+                }
+                "document-edit" => {
+                    let id = h.state().views[0].id;
+                    h.state_mut().session.apply(id, pdfcraft_engine::Edit::RotatePages { pages: vec![0], degrees: 90 }).unwrap();
+                    h.step();
+                }
+                "escape-after-choice" => {
+                    h.key_press(egui::Key::Escape);
+                    h.step();
+                }
+                "zoom-after-choice" => {
+                    h.state_mut().views[0].zoom *= 1.1;
+                    h.step();
+                }
+                "page-after-choice" => {
+                    h.state_mut().views[0].current = 1;
+                    h.step();
+                }
+                "complete-first" => {
+                    h.step();
+                    click_at(&mut h, egui::pos2(1100.0, 700.0));
+                }
+                _ => panic!("unexpected scenario: {scenario}"),
+            }
+            if scenario == "before-choice" {
+                assert_eq!(selected.recv_timeout(std::time::Duration::from_secs(1)).unwrap(), None);
+            }
+            if !scenario.starts_with("complete-") {
+                complete.send(InteractiveEvent::Complete(remediation_outcome(&h))).unwrap();
+            }
+            h.run_steps(4);
+            let delivered = h.state().js_console.log.iter().any(|s| s == "verified completion");
+            println!(
+                "ORDER {scenario} delivered={delivered} page={} console_delta={} open_prompt={} url_prompt={}",
+                h.state().views[0].current,
+                h.state().js_console.log.len() - before,
+                h.state().pending_remote_link.is_some(),
+                h.state().pending_link.is_some()
+            );
+            assert_eq!(delivered, !["before-choice", "document-switch", "document-edit"].contains(&scenario));
+            assert_eq!(h.state().views[0].current, usize::from(!["before-choice", "document-switch", "document-edit"].contains(&scenario)));
+            let id = h.state().views[0].id;
+            let value = &h.state().session.get(id).unwrap().form.iter().find(|f| f.name == "price").unwrap().value;
+            println!("FIELD {scenario} value={value:?}");
+            assert_eq!(value, &[if !["before-choice", "document-switch", "document-edit"].contains(&scenario) { "99" } else { "17" }]);
+            if delivered {
+                assert_eq!(h.state().js_console.log.iter().filter(|s| s.as_str() == "verified completion").count(), 1);
+                assert_ne!(h.state().session.get(id).unwrap().can_undo().map(str::to_owned), undo_before);
+                h.state_mut().session.undo(id).unwrap();
+                assert_eq!(h.state().session.get(id).unwrap().form.iter().find(|f| f.name == "price").unwrap().value, ["17"]);
+            }
+        }
+    }
+    #[test]
+    fn remediation_worker_saturation_literal_bound() {
+        let mut h = harness();
+        let id = h.state().active_ids().unwrap().1;
+        let mut held = Vec::new();
+        for _ in 0..3 {
+            let (tx, rx) = std::sync::mpsc::channel();
+            held.push(tx);
+            h.state_mut().link_script.retired.push(rx);
+        }
+        h.state_mut().run_link_script(id, 0, 0);
+        assert!(h.state().link_script.active.is_none(), "three held retired jobs must prevent a fourth start");
+        assert!(h.state().link_script.pending.is_some());
+        println!("SATURATION held={} active=false pending=true", held.len());
+        held.remove(0).send(InteractiveEvent::Complete(Default::default())).unwrap();
+        h.step();
+        assert!(h.state().link_script.active.is_some());
+        h.key_press(egui::Key::Escape);
+        h.step();
+    }
+    #[test]
+    fn remediation_same_frame_dedupe_directly() {
+        let mut h = harness();
+        let id = h.state().active_ids().unwrap().1;
+        h.state_mut().run_link_script_at(id, 0, 0, egui::pos2(150.0, 160.0), Some(4242));
+        let serial = h.state().link_script.serial;
+        h.state_mut().run_link_script_at(id, 0, 0, egui::pos2(150.0, 160.0), Some(4242));
+        assert_eq!(h.state().link_script.serial, serial, "two direct callbacks in one frame must start once");
+        h.state_mut().run_link_script_at(id, 0, 0, egui::pos2(150.0, 160.0), Some(4243));
+        assert_eq!(h.state().link_script.serial, serial + 1);
+    }
+    #[test]
+    fn remediation_tooltip_on_exact_release_frame() {
+        let mut h = two_links(1.0, "100%");
+        let source = at(&h, 60.0, 60.0);
+        h.hover_at(source);
+        h.run_steps(3);
+        assert!(painted_text(&h, "JavaScript").is_some());
+        h.ctx.options_mut(|o| o.max_passes = std::num::NonZeroUsize::new(1).unwrap());
+        h.drag_at(source);
+        h.step();
+        let frame = h.ctx.cumulative_frame_nr();
+        h.event(egui::Event::PointerButton { pos: source, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.step();
+        assert_eq!(h.ctx.cumulative_frame_nr(), frame + 1, "observe exactly the release frame, not PointerGone");
+        assert!(h.ctx.input(|i| i.pointer.hover_pos().is_some()));
+        assert!(h.state().link_script.active.is_some(), "release must activate the link");
+        println!("EXACT_TOOLTIP release_frames=1 visible={}", painted_text(&h, "JavaScript").is_some());
+        assert!(painted_text(&h, "JavaScript").is_none(), "inspect the release frame itself, before another frame hides the evidence");
+    }
+    #[test]
+    fn remediation_hidden_logic_stale_focus() {
+        let mut h = harness();
+        let id = h.state().active_ids().unwrap().1;
+        h.state_mut().run_link_script(id, 0, 0);
+        wait(&mut h, ready_menu);
+        let ctx = h.ctx.clone();
+        let mut raw = egui::RawInput { focused: false, ..Default::default() };
+        raw.viewports.entry(egui::ViewportId::ROOT).or_default().minimized = Some(true);
+        let job = h.state().link_script.active.as_ref().unwrap();
+        let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new(("pdf-js-menu", job.serial, job.popup_number)));
+        let before = ctx.graphics(|g| g.get(layer).map(|p| p.next_idx().0).unwrap_or(0));
+        let _ = ctx.run_logic(&raw, |ctx| h.state_mut().poll_link_script(ctx));
+        let after = ctx.graphics(|g| g.get(layer).map(|p| p.next_idx().0).unwrap_or(0));
+        let (raw_focus, processed_focus) = ctx.input(|i| (i.raw.focused, i.focused));
+        println!(
+            "HIDDEN_LOGIC raw_focused={raw_focus} processed_focused={processed_focus} active={} shapes_before={before} shapes_after={after}",
+            h.state().link_script.active.is_some()
+        );
+        assert!(!raw_focus);
+        assert!(processed_focus);
+
+        assert_eq!(after, before, "logic must not paint popup shapes");
+    }
+
+    #[test]
+    fn remediation_close_and_disable_reject_completion() {
+        for scenario in ["close-before-choice", "close-after-choice", "disable-after-choice"] {
+            let mut h = harness();
+            let (complete, selected) = remediation_controlled_job(&mut h);
+            let id = h.state().views[0].id;
+            if scenario != "close-before-choice" {
+                h.get_by_label("Next").click();
+                wait(&mut h, |a| a.link_script.active.as_ref().is_some_and(|j| j.menu.is_none()));
+                assert_eq!(selected.recv_timeout(std::time::Duration::from_secs(1)).unwrap().as_deref(), Some("next"));
+            }
+            let out = remediation_outcome(&h);
+            match scenario {
+                "close-before-choice" | "close-after-choice" => h.state_mut().close_tab(0),
+                "disable-after-choice" => h.state_mut().session.set_javascript(false),
+                _ => panic!("unexpected scenario: {scenario}"),
+            }
+            h.step();
+            complete.send(InteractiveEvent::Complete(out)).unwrap();
+            h.run_steps(4);
+            assert!(!h.state().js_console.log.iter().any(|s| s == "verified completion"));
+            assert!(h.state().pending_remote_link.is_none());
+            assert!(h.state().pending_link.is_none());
+            if scenario.starts_with("close") {
+                assert!(h.state().session.get(id).is_none());
+            } else {
+                assert_eq!(h.state().session.get(id).unwrap().form.iter().find(|f| f.name == "price").unwrap().value, ["17"]);
+            }
+            println!("LIFECYCLE {scenario} result_discarded=true requests_delivered=false active={}", h.state().link_script.active.is_some());
+        }
+    }
+
+    #[test]
+    fn remediation_cancel_second_menu_discards_whole_action() {
+        let mut h = scripted_harness(
+            "app.popUpMenuEx({cName:'First'});console.println('accepted first');app.popUpMenuEx({cName:'Second'});console.println('after second');app.launchURL('https://example.org');",
+        );
+        h.get_by_label("First").click();
+        wait(&mut h, |a| {
+            a.link_script.active.as_ref().is_some_and(|j| j.menu.as_ref().is_some_and(|m| m.0.first().is_some_and(|i| i.name == "Second")))
+        });
+        h.key_press(egui::Key::Escape);
+        h.step();
+        h.run_steps(4);
+        assert!(!h.state().js_console.log.iter().any(|s| s == "accepted first" || s == "after second"));
+        assert!(h.state().pending_link.is_none());
+    }
+    #[test]
+    fn remediation_new_activation_preserves_accepted_action() {
+        let mut h = harness();
+        let (complete, selected) = remediation_controlled_job(&mut h);
+        h.get_by_label("Next").click();
+        wait(&mut h, |a| a.link_script.active.as_ref().is_some_and(|j| j.menu.is_none()));
+        assert_eq!(selected.recv_timeout(std::time::Duration::from_secs(1)).unwrap().as_deref(), Some("next"));
+        let id = h.state().views[0].id;
+        h.state_mut().run_link_script(id, 0, 0);
+        complete.send(InteractiveEvent::Complete(remediation_outcome(&h))).unwrap();
+        h.run_steps(4);
+        assert_eq!(h.state().session.get(id).unwrap().form.iter().find(|f| f.name == "price").unwrap().value, ["99"]);
+        assert_eq!(h.state().js_console.log.iter().filter(|s| s.as_str() == "verified completion").count(), 1);
+    }
+
+    #[test]
+    fn remediation_completion_without_menu_choice_is_discarded() {
+        // A reply timeout can let the worker complete while the UI still holds the menu.
+        // It has not accepted any choice, so this must not commit a null continuation.
+        let mut h = harness();
+        let (complete, _selected) = remediation_controlled_job(&mut h);
+        complete.send(InteractiveEvent::Complete(remediation_outcome(&h))).unwrap();
+        h.run_steps(4);
+        let id = h.state().views[0].id;
+        assert_eq!(h.state().session.get(id).unwrap().form.iter().find(|f| f.name == "price").unwrap().value, ["17"]);
+        assert!(!h.state().js_console.log.iter().any(|s| s == "verified completion"));
+        assert!(h.state().pending_link.is_none());
+        assert!(h.state().pending_remote_link.is_none());
+    }
+
+    #[test]
+    fn remediation_second_menu_uses_the_view_after_an_accepted_choice() {
+        let mut h = harness();
+        let (complete, selected) = remediation_controlled_job(&mut h);
+        h.get_by_label("Next").click();
+        wait(&mut h, |a| a.link_script.active.as_ref().is_some_and(|j| j.menu.is_none()));
+        assert_eq!(selected.recv_timeout(std::time::Duration::from_secs(1)).unwrap().as_deref(), Some("next"));
+        h.state_mut().views[0].set_zoom(1.1);
+        let (reply, selected) = std::sync::mpsc::channel();
+        complete.send(InteractiveEvent::Menu(vec![entry("Second", true, vec![])], reply)).unwrap();
+        h.step();
+        assert!(
+            h.state().link_script.active.as_ref().is_some_and(|j| j.menu.is_some()),
+            "a view change during accepted execution must not cancel its next menu"
+        );
+        h.run_steps(2);
+        h.get_by_label("Second").click();
+        wait(&mut h, |a| a.link_script.active.as_ref().is_some_and(|j| j.menu.is_none()));
+        assert_eq!(selected.recv_timeout(std::time::Duration::from_secs(1)).unwrap().as_deref(), Some("return Second"));
+        complete.send(InteractiveEvent::Complete(remediation_outcome(&h))).unwrap();
+        h.run_steps(4);
+        let id = h.state().views[0].id;
+        assert_eq!(h.state().session.get(id).unwrap().form.iter().find(|f| f.name == "price").unwrap().value, ["99"]);
+    }
+
+    #[test]
+    fn remediation_menu_without_previous_choice_cancels_the_action() {
+        // A timeout can resume the worker into another popup, without any UI reply.
+        let mut h = harness();
+        let (complete, first_choice) = remediation_controlled_job(&mut h);
+        let (reply, second_choice) = std::sync::mpsc::channel();
+        complete.send(InteractiveEvent::Menu(vec![entry("Unchosen continuation", true, vec![])], reply)).unwrap();
+        h.step();
+        assert!(h.state().link_script.active.is_none(), "the worker advanced without a choice; retire the whole action");
+        assert_eq!(first_choice.recv_timeout(std::time::Duration::from_secs(1)).unwrap(), None);
+        assert_eq!(second_choice.recv_timeout(std::time::Duration::from_secs(1)).unwrap(), None);
+        complete.send(InteractiveEvent::Complete(remediation_outcome(&h))).unwrap();
+        h.run_steps(4);
+        let id = h.state().views[0].id;
+        assert_eq!(h.state().session.get(id).unwrap().form.iter().find(|f| f.name == "price").unwrap().value, ["17"]);
+        assert!(!h.state().js_console.log.iter().any(|s| s == "verified completion"));
+        assert!(h.state().pending_link.is_none());
+        assert!(h.state().pending_remote_link.is_none());
     }
 }

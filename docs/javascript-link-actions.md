@@ -4,6 +4,9 @@ PdfCraft inspects `/Subtype /Link /A /S /JavaScript` without rewriting the actio
 `/A` and `/JS` may be indirect objects. `/JS` may be a PDF string or a decoded stream;
 the inspection reader caps decoded bytes at 256 KiB and uses the common PDF text decoder.
 Malformed, cyclic and oversized operands remain unsupported actions, never executable source.
+Rejected stream decodes are cached by resolved stream identity within one inspection. The FIFO
+cache retains at most 4,096 identities and no decoded data; eviction permits retrying an older
+failure. Failed decodes spend none of the source budget, so later valid sources remain available.
 The retained link sources have a shared 4 MiB UTF-8 budget across the document, so repeated
 references cannot multiply a small action into unbounded memory. Reaching that budget records
 one inspection warning and leaves subsequent JavaScript actions unsupported; ordinary links
@@ -44,20 +47,26 @@ comment tips remain available. Canvas hover tips are pointer-transparent, so the
 or previous-frame rectangles cannot intercept clicks intended for a menu or the document.
 Signature validation badge tips also remain available during a JavaScript menu interaction.
 
-An outside press cancels the old interaction without consuming the pointer event: the canvas,
-another annotation or an interface control receives that same press/release. Another link starts
-a fresh invocation immediately when a worker slot is available. It never replays the old script.
-Every retired menu receives null; all later menus from that execution are cancelled and its
-completion is discarded, including field changes and external requests. Each invocation has its
-own receiver and immutable engine identity/generation check. Frame identity prevents egui
-multi-pass layout from starting the same activation twice.
+An outside press cancels a menu still awaiting a choice without consuming the pointer event:
+the canvas, another annotation or an interface control receives that same press/release.
+After a choice is accepted, the action keeps running through outside interaction, loss of focus,
+Escape and view changes. A new link activation waits for that accepted action; only the latest
+queued activation is retained, and it must still match its captured document generation to start.
 
-At most three live execution channels are retained. If all slots are occupied, only the latest
-activation is queued; it starts when a bounded worker finishes. The graphics thread only polls
-channels. Closing/switching documents, changing page/zoom/rotation/layout, editing, disabling
-JavaScript, opening another dialog, loss of window focus, outside scrolling, Tab and command
-shortcuts cancel the interaction. Menu scrolling stays inside the menu. Escape is consumed;
-outside pointer/scroll events and document shortcuts are left available to the reader.
+Cancelling a waiting menu, including a second popup in the same action, cancels the whole action.
+Every retired menu receives null; later menus are cancelled and completion is discarded, including
+field changes and external requests. A completion arriving while a menu still awaits a choice
+(for example after the reply timeout) is discarded too. If the worker advances to another popup
+without a UI reply, the whole action is retired and both menus receive null. Completed jobs are removed; retired
+receivers are only drained, never applied. Each invocation retains its immutable engine identity
+and generation checks. Frame identity prevents multi-pass layout from starting an activation twice.
+
+At most three live execution channels are retained. If all slots are occupied, the latest
+activation waits for a bounded worker to finish. Logical polling does not paint or consume keys;
+the UI pass alone draws and handles menu input. Closing/switching documents, editing or disabling
+JavaScript invalidates accepted results as well as waiting menus. While awaiting a choice, view
+changes, another dialog, loss of focus, outside scrolling, Tab and command shortcuts cancel the
+interaction. Menu scrolling stays inside the menu; outside events remain available to the reader.
 
 The opt-in control channel reports `javascript_menu` in `ui.state`, with source document/page/
 annotation, captured anchor, visible rectangles, execution sequence and live channel count.
@@ -75,6 +84,8 @@ and 32 popup calls per action. Each reply wait expires after five minutes. Dropp
 or its reply channel releases a waiting worker. Existing Boa limits remain: one million
 loop iterations, recursion 256, bounded parser nesting, and a dedicated script stack.
 Document initialization additionally permits at most 1,024 scripts totalling 1 MiB.
+These aggregate limits also apply to fields, buttons and the console. Refusal preserves the
+input value and reports a diagnostic to the host; field calculation does not open a modal alert.
 
 `pageNum` requests navigate the source document's view. `app.launchURL` uses the existing
 document URL allowlist and explicit consent flow. `app.openDoc(cPath)` and
@@ -96,6 +107,8 @@ It returns `menus`, `alerts`, `console`, `requests`, and `error`. `menu_choices`
 array of `cReturn` strings or null, consumed in popup order, maximum 32 entries. Omitted choices
 cancel. Invalid selections fail closed. External URL/file requests are returned to the caller
 and never executed; consequently this tool does not read paths outside `--root`.
+The tool is marked destructive in MCP because scripts can change fields or reset the form.
+That hint does not grant permissions; the engine still checks all edits and batches them for Undo.
 
 Engine APIs are `Session::prepare_link_javascript`, `LinkScript::start` (native),
 `LinkScript::run` (headless cancellation), `Session::link_javascript_is_current`, and
@@ -104,8 +117,11 @@ Engine APIs are `Session::prepare_link_javascript`, `LinkScript::start` (native)
 ## Compatibility boundaries
 
 This extends the existing Acrobat subset rather than implementing the entire Acrobat host.
-Named document scripts are initialized for each fresh action context, as existing form execution
-does; globals are not persistent between actions. Catalog OpenAction and document/page lifecycle
+Named document scripts are initialized once per fresh context; globals are not persistent between
+actions. Link initialization uses Doc/Open, then Link/Mouse Up with a document target. Existing
+field, button and console calls initialize under their actual event, without a synthetic Open.
+Field targets remain fields; legacy events without a target use null. The Link global event
+binding is non-enumerable so its document target does not make event serialization cyclic. Catalog OpenAction and document/page lifecycle
 actions, `/Next` action chains, other annotation triggers, named JavaScript destinations and
 all other Acrobat APIs remain outside this implementation. `app.openDoc` returns `null`
 immediately, not a live Doc object: opening is deferred to consent, and subsequent script access
