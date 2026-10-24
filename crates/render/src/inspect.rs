@@ -638,6 +638,13 @@ fn inspect_structure(info: &mut DocInfo, fill: impl FnOnce(&mut DocInfo) -> Resu
     }
 }
 
+/// Negative cache of failed script-stream decompressions during one structure inspection.
+/// Callers must supply stream addresses that stay stable for that inspection; these are
+/// opaque identities, never dereferenced here. Do not reuse the cache across documents,
+/// edits or inspections, where an address may identify a different stream.
+/// FIFO eviction bounds it to 4096 identities and allows an evicted failure to be retried;
+/// a cache hit does not refresh its position. This bounds retained failures, not the
+/// total decoding work, and does not cache successful sources or spend their text budget.
 #[derive(Default)]
 struct RejectedJavaScript {
     identities: std::collections::HashSet<*const lopdf::Stream>,
@@ -1414,6 +1421,13 @@ impl<'a> Inspector<'a> {
         info.annotations.sort_by(|a, b| a.page.cmp(&b.page).then(b.rect[3].total_cmp(&a.rect[3])));
     }
 
+    /// Inspect the direct destination/action; JavaScript source is data, never executed here.
+    /// Script strings and decompressed streams are capped at 256 KiB before PDF-text
+    /// conversion. `annotations` shares a 4 MiB budget for retained UTF-8 script text
+    /// and one negative stream cache across the inspection. Decompression failures do
+    /// not debit that budget; a decoded source exceeding its remainder exhausts it.
+    /// Unsupported/refused script sources become Other("JavaScript"); malformed or
+    /// missing actions can return None. This does not traverse an action's Next chain.
     fn link(
         &self,
         page: usize,

@@ -1076,6 +1076,11 @@ fn platform() -> &'static str {
     }
 }
 
+/// Build a fresh event object: a named field takes precedence as `target`; without one,
+/// `document_target` selects the document/global object, otherwise target is null.
+/// `targetName` is empty without a field. `run_here` enables document targets for Link
+/// and its synthetic Doc/Open initialization; it also owns the global event binding's
+/// non-enumerability, which is separate from this object's property attributes.
 fn event_object(ctx: &mut Context, e: &Event, document_target: bool) -> JsObject {
     let target: JsValue = match &e.target {
         Some(t) => field_object(ctx, t).into(),
@@ -1274,6 +1279,13 @@ impl HostHooks for CheckedCodeFromStrings {
     }
 }
 
+/// Evaluate in a fresh Boa context with string-code generation disabled and COW fields.
+/// Link actions initialize document scripts under a synthetic Doc/Open event, then restore
+/// the real event before the action; other callers initialize under their actual event.
+/// Document initialization errors stop evaluation. Collected field changes, diagnostics
+/// and requests can still accompany an error; this function only returns an Outcome,
+/// leaving eligibility and application of effects to the caller.
+/// Limits are cooperative engine/host limits, not hard wall-time or heap quotas.
 fn run_here(script: &str, event: &Event, doc: &DocInfo, fields: Arc<Vec<FieldState>>, doc_scripts: &[String], limits: Limits) -> Outcome {
     if let Some(why) = initialization_limit(doc_scripts) {
         return Outcome { rc: true, value: event.value.clone(), change: event.change.clone(), error: Some(why), ..Default::default() };
@@ -1372,6 +1384,11 @@ thread_local! {
     static MENU_HOST: RefCell<Option<(std::sync::mpsc::Sender<InteractiveEvent>, usize)>> = const { RefCell::new(None) };
 }
 
+/// Read one menu tree, sharing `remaining` across all arguments and descendants.
+/// `popup_menu` supplies 1024 entries; roots have depth zero and depths above 16 fail.
+/// Names/return values are limited to 4096 UTF-8 bytes each; absent cReturn uses cName.
+/// Malformed items, exceeded limits and Boa property/conversion errors are returned.
+/// Reading properties may run script code; these bounds are not a hard time/heap quota.
 fn read_menu(value: &JsValue, ctx: &mut Context, depth: usize, remaining: &mut usize) -> JsResult<MenuItem> {
     if depth > 16 || *remaining == 0 {
         return Err(error("popup menu exceeds its size or depth limit"));
@@ -1407,6 +1424,12 @@ fn read_menu(value: &JsValue, ctx: &mut Context, depth: usize, remaining: &mut u
     Ok(MenuItem { name, value, enabled: enabled.is_undefined() || enabled.to_boolean(), marked, children })
 }
 
+/// Parse a bounded menu and rendezvous with the interactive host, up to 32 times per action.
+/// Without a host, a successfully parsed menu returns null. Only the script worker waits
+/// for a reply: up to 300 seconds, with timeout, cancellation or reply disconnection
+/// yielding null. Sending to a closed host or receiving a forged selection is an error.
+/// A selection must match an enabled, non-separator leaf through enabled ancestors.
+/// Reply validation does not authorize document effects; the caller revalidates completion.
 fn popup_menu(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let mut remaining = 1024;
     let mut items = Vec::new();
@@ -1436,6 +1459,11 @@ fn popup_menu(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsVa
     }
 }
 
+/// Queue OpenDoc as a viewer request and return null, never a live document or file contents.
+/// Reject empty/oversized paths, nonempty cFS, non-null oDoc and unsupported positional
+/// options. This host performs no file I/O; request retention follows the host's limits.
+/// Local-path resolution and consent belong to the frontend, while headless tools return
+/// the request as data. A request alone is not permission to open a file.
 fn open_doc(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let arg = arg(args, 0);
     let path = if let Some(o) = arg.as_object() {

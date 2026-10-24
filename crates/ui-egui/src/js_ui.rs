@@ -604,6 +604,11 @@ fn date_format(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) {
 }
 
 impl PdfCraftApp {
+    /// Resolve a script's local path without I/O and queue the existing consent prompt.
+    /// Relative paths use the source document's path, with no working-directory fallback.
+    /// If another remote-link or link prompt is pending, ignore this request rather than
+    /// replacing it. Resolution failures are shown; accepting the prompt later schedules
+    /// normal file opening/validation. The web build reports this operation as unavailable.
     fn request_script_document(&mut self, id: DocId, file: String) {
         #[cfg(not(target_arch = "wasm32"))]
         {

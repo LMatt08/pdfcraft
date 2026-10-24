@@ -237,6 +237,18 @@ fn dest_view_value(view: DestView) -> Value {
 }
 
 impl Automation {
+    /// Run a link at the tool's one-based page/raw annotation index against a snapshot.
+    /// Native execution answers menus in order from `menu_choices` (up to 32 strings/nulls);
+    /// missing choices cancel that menu with null. A null reply resumes the script; a
+    /// successful continuation can still commit edits, unlike retiring an action in the UI.
+    /// Each event has a ten-second receive
+    /// timeout, not a deadline for the whole action. Malformed arguments, channel failures
+    /// and preparation/commit failures become tool errors. Script failures, including forged
+    /// menu values, are returned in `error` without committing script edits or requests.
+    /// Abandoning a receiver does not terminate its worker. WASM runs synchronously with
+    /// menus cancelled.
+    /// Finish revalidates the document and applies eligible edits through permissions/Undo.
+    /// Remaining viewer requests are returned as data, without opening files or dispatching I/O.
     pub(crate) fn link_run_javascript(&mut self, a: &Args) -> Result<Value> {
         let id = self.doc(a)?.id;
         let page = usize::try_from(a.int("page")?.checked_sub(1).filter(|n| *n >= 0).ok_or_else(|| bad("page must be positive"))?)

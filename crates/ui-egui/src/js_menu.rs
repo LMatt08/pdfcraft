@@ -78,6 +78,11 @@ impl LinkMenus {
         self.active.is_none() && self.pending.is_none()
     }
 
+    /// Abandon this action's results without interrupting its script worker.
+    /// Cancel any held menu reply and, when `ctx` is supplied, release only this popup's
+    /// focus. Keep the receiver for `reap` to cancel later menus and discard completion.
+    /// It still occupies an admission slot until completion/disconnection is drained;
+    /// retirement neither terminates the VM nor rolls back its in-memory execution.
     fn retire(&mut self, mut job: LinkJob, ctx: Option<&egui::Context>) {
         if let Some((_, reply)) = job.menu.take() {
             let _ = reply.send(None);
@@ -88,6 +93,10 @@ impl LinkMenus {
         self.retired.push(job.events);
     }
 
+    /// Drain retired receivers without applying outcomes, at most 33 events each per pass.
+    /// Menus receive null replies; Complete/disconnection drops the receiver and its slot,
+    /// while Empty keeps it for a later pass. This bounds UI work, not worker lifetime:
+    /// draining or dropping a receiver does not forcibly terminate JavaScript execution.
     fn reap(&mut self) {
         self.retired.retain(|events| {
             // The VM already caps popups at 32 per action. Never spend an unbounded frame draining.
@@ -136,11 +145,17 @@ fn stamp(app: &PdfCraftApp, id: DocId) -> Option<ViewStamp> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+/// UI authority for every phase: the source is active, unchanged and JavaScript-enabled.
+/// View geometry and focus are deliberately separate; `current` adds the geometry check
+/// needed by queued actions and menus waiting for a choice.
 fn document_current(app: &PdfCraftApp, pending: &Pending) -> bool {
     app.active_ids().is_some_and(|(_, id)| id == pending.input.document_id()) && app.session.link_javascript_is_current(&pending.input)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+/// Require document authority and the captured view geometry for a pending/menu wait.
+/// Do not use this geometry-sensitive guard to cancel Running or Accepted jobs: a view
+/// change alone does not invalidate their eventual document result.
 fn current(app: &PdfCraftApp, pending: &Pending) -> bool {
     document_current(app, pending) && stamp(app, pending.input.document_id()) == Some(pending.stamp)
 }
@@ -185,6 +200,12 @@ impl PdfCraftApp {
     }
 
     /// The pointer position is captured by the canvas in viewport points, before the worker starts.
+    /// On desktop, repeated activations of the same document/page/annotation in one supplied
+    /// frame are ignored. The web build only reports that interactive menus are unavailable.
+    /// A new activation retires any unaccepted action, including Running, and replaces the
+    /// pending activation. Accepted actions finish first; at most the latest successfully
+    /// prepared activation waits behind them. Preparation applies no script effects;
+    /// `start_pending_menu` starts it only when its view is current and a slot is available.
     pub(crate) fn run_link_script_at(&mut self, id: DocId, page: usize, annotation: usize, anchor: egui::Pos2, frame: Option<u64>) {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -229,6 +250,11 @@ impl PdfCraftApp {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Admit the latest queued snapshot only with no active job and fewer than three
+    /// retained retired receivers. Recheck document/view validity before starting Running;
+    /// a stale pending snapshot is dropped, and start errors are shown to the user.
+    /// There is at most one pending activation, not an unbounded queue. The active plus
+    /// retired receivers enforce local admission; this is not a global VM/thread quota.
     fn start_pending_menu(&mut self, state: &mut LinkMenus) {
         if state.active.is_some() || state.retired.len() >= MAX_WORKERS {
             return;
@@ -256,6 +282,18 @@ impl PdfCraftApp {
         }
     }
 
+    /// On desktop, advance jobs from App::logic without painting or consuming input events.
+    /// Document authority is required in every phase. Geometry, modal/palette state and
+    /// raw focus additionally invalidate queued actions and AwaitingChoice, not Running
+    /// or Accepted jobs whose results are still pending.
+    ///
+    /// A Menu from Running/Accepted captures the current view and enters AwaitingChoice;
+    /// `show_link_script` enters Accepted after successfully sending a choice. Another Menu
+    /// while AwaitingChoice retires the action, and Complete in that phase is discarded: a
+    /// timed-out null continuation must not commit an unchosen action. Other Complete
+    /// events go through `finish_link_javascript` once, then dispatch its returned output.
+    /// Disconnection releases the job without effects; retired receivers are only drained.
+    /// Completion/removal allows the latest valid pending action to start. No-op on the web.
     pub(crate) fn poll_link_script(&mut self, ctx: &egui::Context) {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -350,8 +388,13 @@ impl PdfCraftApp {
         let _ = ctx;
     }
 
-    /// Paint and handle current-pass input only from App::ui. Completion removes the
-    /// active job; cancellation retires its receiver and never applies its later results.
+    /// On desktop, paint/handle current-pass input only from App::ui for AwaitingChoice jobs.
+    /// All phases require document authority; Running/Accepted otherwise retain their
+    /// receivers without dismissing a nonexistent menu or consuming its keys.
+    /// Invalid view/focus, modal/palette state, outside interactions or Escape retire a
+    /// waiting action; a successfully sent choice enters Accepted. Retirement discards later
+    /// effects without stopping the worker. `poll_link_script` owns completion/application.
+    /// No-op on the web.
     pub(crate) fn show_link_script(&mut self, ctx: &egui::Context) {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -467,6 +510,10 @@ impl MenuView {
         })
     }
 
+    /// Navigate enabled non-separator entries, updating keyboard and submenu paths.
+    /// Enter/Space on a leaf returns its exact cReturn value; other navigation returns
+    /// None, meaning no choice rather than cancellation. Submenu entry/exit stays within
+    /// the current tree; the caller handles Escape and dismissal separately.
     fn key(&mut self, items: &[MenuItem], key: egui::Key) -> Option<String> {
         let mut path = self.keyboard.clone().unwrap_or_default();
         let previous = path.pop();
@@ -590,6 +637,9 @@ impl MenuView {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+/// Leave click dismissal to `show_link_script`, which owns phase/cancellation policy.
+/// IgnoreClicks prevents egui's default closing behavior from bypassing that decision;
+/// outside events remain available for the document's normal interaction handling.
 fn menu_popup(ctx: &egui::Context, id: egui::Id, anchor: egui::Pos2, width: f32) -> egui::Popup<'static> {
     egui::Popup::new(id, ctx.clone(), anchor, egui::LayerId::background())
         .kind(egui::PopupKind::Menu)

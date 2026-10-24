@@ -224,6 +224,10 @@ impl Session {
     /// Run `script` in document `id`, for a button (`target`: the field, event "Mouse Up") or
     /// the console (no target). Field changes and `resetForm` are applied as one undoable step;
     /// everything else the script asked for is returned.
+    /// The ordinary button/console path applies collected edits even when `Outcome::error`
+    /// is set: a script error is returned in the outcome, not a promise of rollback.
+    /// Edit failures instead return `EditError`. Link actions use
+    /// [`Self::finish_link_javascript`], which discards failed scripts' edits and requests.
     pub fn run_javascript(&mut self, id: DocId, script: &str, target: Option<&str>) -> Result<Outcome, EditError> {
         if self.js_off {
             return Err(EditError::Invalid("JavaScript is turned off (Preferences ▸ JavaScript)".into()));
@@ -259,6 +263,13 @@ impl Session {
         Ok(o)
     }
 
+    /// Submit field changes and `resetForm` requests as one permission-checked Undo batch.
+    /// `states` and `fields` must describe the source snapshot used to produce `o`.
+    /// The caller decides whether that outcome is eligible: this helper checks neither
+    /// its error nor the source identity/generation. Link completion rejects failed or
+    /// stale results before calling it; the synchronous runner has a different error policy.
+    /// Reset requests are consumed before submitting the batch, even if the edit fails;
+    /// other viewer requests stay in `o`. Edit failures propagate from `Session::apply`.
     fn apply_javascript_outcome(
         &mut self,
         id: DocId,
