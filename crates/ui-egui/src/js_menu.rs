@@ -268,7 +268,7 @@ impl PdfCraftApp {
                 // Logical polling never paints or consumes UI events. Raw focus is updated
                 // even by egui's hidden-window run_logic; processed input may still be stale.
                 let invalid = !document_current(self, &job.pending)
-                    || (job.phase != JobPhase::Accepted
+                    || (job.phase == JobPhase::AwaitingChoice
                         && (!current(self, &job.pending) || self.modal_open() || self.palette_open || !ctx.input(|i| i.raw.focused)));
                 if invalid {
                     state.retire(job, Some(ctx));
@@ -283,7 +283,7 @@ impl PdfCraftApp {
                             cancelled = true;
                         }
                         Ok(InteractiveEvent::Menu(items, reply)) => {
-                            // A view change during accepted execution does not invalidate the
+                            // A view change during execution does not invalidate the
                             // document. A subsequent menu starts a new geometry-sensitive wait.
                             if let Some(stamp) = stamp(self, job.pending.input.document_id()) {
                                 job.pending.stamp = stamp;
@@ -357,7 +357,10 @@ impl PdfCraftApp {
         {
             let mut state = std::mem::take(&mut self.link_script);
             if let Some(mut job) = state.active.take() {
-                if job.phase == JobPhase::Accepted {
+                if !document_current(self, &job.pending) {
+                    state.retire(job, Some(ctx));
+                } else if job.phase != JobPhase::AwaitingChoice {
+                    // Running and accepted actions have no menu to dismiss or consume input.
                     state.active = Some(job);
                 } else {
                     let same_frame = job.pending.frame == Some(ctx.cumulative_frame_nr());
@@ -944,7 +947,7 @@ mod tests {
         assert_eq!(view.key(&items, egui::Key::Enter).as_deref(), Some("return child"));
     }
 
-    fn scripted_harness(script: &str) -> Harness<'static, PdfCraftApp> {
+    fn scripted_fixture(script: &str) -> Vec<u8> {
         let mut cos = pdfcraft_cos::Document::open(std::sync::Arc::new(fixture())).unwrap();
         let cat = cos.get(cos.root().unwrap());
         let pages = cos.resolve(cat.as_dict().unwrap().get(b"Pages").unwrap());
@@ -956,7 +959,10 @@ mod tests {
         let mut d = cos.get(action).as_dict().unwrap().clone();
         d.set(b"JS".to_vec(), Object::String(PdfString::text(script)));
         cos.set(action, d);
-        let bytes = pdfcraft_cos::write_incremental(&cos, &Default::default()).unwrap();
+        pdfcraft_cos::write_incremental(&cos, &Default::default()).unwrap()
+    }
+    fn scripted_harness(script: &str) -> Harness<'static, PdfCraftApp> {
+        let bytes = scripted_fixture(script);
         let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(|_cc| {
             let mut a = PdfCraftApp::new();
             a.set_option("language", "en").unwrap();
@@ -1221,6 +1227,258 @@ mod tests {
         assert!(h.state().link_script.is_none());
         assert!(!h.state().session.get(id).unwrap().dirty);
     }
+    // Hold a real worker completion at the UI channel boundary, without timing a slow VM.
+    fn hardening_running_job(error: bool) -> (Harness<'static, PdfCraftApp>, Sender<InteractiveEvent>, pdfcraft_engine::js::Outcome) {
+        let script = if error {
+            "getField('price').value=99; console.println('running completion'); app.launchURL('https://example.invalid'); throw new Error('running failure');"
+        } else {
+            "getField('price').value=99; console.println('running completion'); this.pageNum=1;"
+        };
+        let mut h = read_harness(scripted_fixture(script), 1.0, "100%");
+        let id = h.state().views[0].id;
+        h.state_mut()
+            .session
+            .apply(
+                id,
+                pdfcraft_engine::Edit::AddField {
+                    page: 0,
+                    rect: [110.0, 110.0, 200.0, 130.0],
+                    kind: pdfcraft_engine::NewField::Text { multiline: false },
+                    name: Some("price".into()),
+                },
+            )
+            .unwrap();
+        h.state_mut()
+            .session
+            .apply(id, pdfcraft_engine::Edit::SetFieldValue { name: "price".into(), value: pdfcraft_engine::FieldValue::Text("17".into()) })
+            .unwrap();
+        let input = h.state().session.prepare_link_javascript(id, 0, 0).unwrap();
+        let actual = input.start().unwrap().recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        let InteractiveEvent::Complete(outcome) = actual else { panic!("the script must never request a menu") };
+        assert_eq!(outcome.error.is_some(), error);
+        let pending = Pending { input, anchor: egui::pos2(350.0, 220.0), stamp: stamp(h.state(), id).unwrap(), page: 0, annotation: 0, frame: None };
+        let (complete, events) = std::sync::mpsc::channel();
+        h.state_mut().link_script.active =
+            Some(LinkJob { pending, events, menu: None, popup: MenuView::default(), serial: 1, popup_number: 0, phase: JobPhase::Running });
+        (h, complete, outcome)
+    }
+
+    fn hardening_assert_running_completion(
+        h: &mut Harness<'static, PdfCraftApp>,
+        complete: Sender<InteractiveEvent>,
+        out: pdfcraft_engine::js::Outcome,
+    ) {
+        let id = h.state().views[0].id;
+        complete.send(InteractiveEvent::Complete(out)).unwrap();
+        h.run_steps(4);
+        assert!(h.state().link_script.active.is_none());
+        assert!(h.state().link_script.retired.is_empty());
+        assert_eq!(h.state().js_console.log.iter().filter(|s| s.as_str() == "running completion").count(), 1);
+        assert_eq!(h.state().session.get(id).unwrap().form.iter().find(|f| f.name == "price").unwrap().value, ["99"]);
+        h.state_mut().session.undo(id).unwrap();
+        assert_eq!(h.state().session.get(id).unwrap().form.iter().find(|f| f.name == "price").unwrap().value, ["17"]);
+    }
+
+    #[test]
+    fn hardening_running_poll_preserves_completion_on_focus_and_view_changes() {
+        for scenario in ["focus", "zoom", "page", "palette"] {
+            let (mut h, complete, out) = hardening_running_job(false);
+            let mut raw = egui::RawInput::default();
+            match scenario {
+                "focus" => raw.focused = false,
+                "zoom" => h.state_mut().views[0].zoom *= 1.1,
+                "page" => h.state_mut().views[0].current = 1,
+                "palette" => h.state_mut().palette_open = true,
+                _ => panic!("unexpected scenario: {scenario}"),
+            }
+            let _ = h.ctx.clone().run_logic(&raw, |ctx| h.state_mut().poll_link_script(ctx));
+            assert!(h.state().link_script.active.is_some(), "Running lost in poll: {scenario}");
+            h.state_mut().palette_open = false;
+            hardening_assert_running_completion(&mut h, complete, out);
+        }
+    }
+
+    #[test]
+    fn hardening_running_ui_preserves_completion_on_outside_and_escape() {
+        for scenario in ["outside", "escape", "focus", "zoom", "palette"] {
+            let (mut h, complete, out) = hardening_running_job(false);
+            let mut raw = egui::RawInput::default();
+            match scenario {
+                "outside" => raw.events.push(egui::Event::PointerButton {
+                    pos: egui::pos2(1100.0, 700.0),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                }),
+                "escape" => raw.events.push(egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }),
+                "focus" => raw.focused = false,
+                "zoom" => h.state_mut().views[0].zoom *= 1.1,
+                "palette" => h.state_mut().palette_open = true,
+                _ => panic!("unexpected scenario: {scenario}"),
+            }
+            let mut output = h.ctx.clone().run_ui(raw, |ui| h.state_mut().show_link_script(ui.ctx()));
+            // This isolated UI pass checks state and input, without rendering its textures.
+            output.textures_delta.clear();
+            assert!(h.state().link_script.active.is_some(), "Running lost in UI: {scenario}");
+            if scenario == "escape" {
+                assert!(h.ctx.input(|i| i.key_pressed(egui::Key::Escape)), "a running action must leave Escape to the document");
+            }
+            h.state_mut().palette_open = false;
+            hardening_assert_running_completion(&mut h, complete, out);
+        }
+    }
+
+    #[test]
+    fn hardening_running_error_is_reported_without_committing_edits_or_requests() {
+        let (mut h, complete, out) = hardening_running_job(true);
+        let id = h.state().views[0].id;
+        h.state_mut().views[0].zoom *= 1.1;
+        h.step();
+        complete.send(InteractiveEvent::Complete(out)).unwrap();
+        h.run_steps(4);
+        assert!(h.state().js_console.log.iter().any(|s| s.contains("running failure")));
+        assert!(h.state().pending_link.is_none());
+        assert_eq!(h.state().session.get(id).unwrap().form.iter().find(|f| f.name == "price").unwrap().value, ["17"]);
+        assert!(h.state().link_script.retired.is_empty());
+    }
+
+    #[test]
+    fn hardening_running_first_menu_uses_current_view_and_still_cancels() {
+        for accept in [false, true] {
+            let (mut h, complete, out) = hardening_running_job(false);
+            let id = h.state().views[0].id;
+            // Use real navigation: assigning current alone leaves the old scroll position,
+            // so the canvas can legitimately change it again during the next layout.
+            h.state_mut().views[0].set_zoom(1.1);
+            h.state_mut().views[0].go_to_page(1);
+            h.run_steps(2);
+            assert_eq!(h.state().views[0].current, 1);
+            assert!(h.state().link_script.active.as_ref().is_some_and(|job| job.phase == JobPhase::Running));
+            let (reply, selected) = std::sync::mpsc::channel();
+            complete.send(InteractiveEvent::Menu(vec![entry("First", true, vec![])], reply)).unwrap();
+            h.step();
+            assert!(
+                h.state().link_script.active.as_ref().is_some_and(|job| job.phase == JobPhase::AwaitingChoice && current(h.state(), &job.pending))
+            );
+            h.run_steps(2);
+            if accept {
+                h.get_by_label("First").click();
+                h.step();
+                assert_eq!(selected.recv_timeout(std::time::Duration::from_secs(1)).unwrap().as_deref(), Some("return First"));
+                hardening_assert_running_completion(&mut h, complete, out);
+            } else {
+                h.key_press(egui::Key::Escape);
+                h.step();
+                assert_eq!(selected.recv_timeout(std::time::Duration::from_secs(1)).unwrap(), None);
+                complete.send(InteractiveEvent::Complete(out)).unwrap();
+                h.run_steps(4);
+                assert!(h.state().link_script.active.is_none());
+                assert!(h.state().link_script.retired.is_empty());
+                assert!(!h.state().js_console.log.iter().any(|s| s == "running completion"));
+                assert_eq!(h.state().session.get(id).unwrap().form.iter().find(|f| f.name == "price").unwrap().value, ["17"]);
+            }
+        }
+    }
+
+    #[test]
+    fn hardening_running_document_invalidation_rejects_late_completion_in_both_passes() {
+        for boundary in ["logic", "ui"] {
+            for scenario in ["close", "switch", "edit", "disable"] {
+                let (mut h, complete, out) = hardening_running_job(false);
+                let id = h.state().views[0].id;
+                match scenario {
+                    "close" => h.state_mut().close_tab(0),
+                    "switch" => {
+                        h.state_mut().open_bytes("other.pdf", None, fixture()).unwrap();
+                        wait(&mut h, |a| a.views.len() == 2);
+                    }
+                    "edit" => h.state_mut().session.apply(id, pdfcraft_engine::Edit::RotatePages { pages: vec![0], degrees: 90 }).unwrap(),
+                    "disable" => h.state_mut().session.set_javascript(false),
+                    _ => panic!("unexpected scenario: {scenario}"),
+                }
+                let ctx = h.ctx.clone();
+                if boundary == "logic" {
+                    let _ = ctx.run_logic(&egui::RawInput::default(), |ctx| h.state_mut().poll_link_script(ctx));
+                } else {
+                    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| h.state_mut().show_link_script(ui.ctx()));
+                    output.textures_delta.clear();
+                }
+                assert!(h.state().link_script.active.is_none(), "{boundary}: {scenario}");
+                complete.send(InteractiveEvent::Complete(out)).unwrap();
+                h.run_steps(4);
+                assert!(h.state().link_script.retired.is_empty());
+                assert!(!h.state().js_console.log.iter().any(|s| s == "running completion"));
+                assert!(h.state().pending_link.is_none());
+                assert!(h.state().pending_remote_link.is_none());
+                if let Some(doc) = h.state().session.get(id) {
+                    assert_eq!(doc.form.iter().find(|f| f.name == "price").unwrap().value, ["17"]);
+                } else {
+                    assert_eq!(scenario, "close");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hardening_running_disconnect_releases_slot_without_effects() {
+        let (mut h, complete, _) = hardening_running_job(false);
+        let id = h.state().views[0].id;
+        drop(complete);
+        h.run_steps(4);
+        assert!(h.state().link_script.active.is_none());
+        assert!(h.state().link_script.retired.is_empty());
+        assert!(!h.state().js_console.log.iter().any(|s| s == "running completion"));
+        assert_eq!(h.state().session.get(id).unwrap().form.iter().find(|f| f.name == "price").unwrap().value, ["17"]);
+        h.state_mut().run_link_script(id, 0, 0);
+        wait(&mut h, |a| a.js_console.log.iter().any(|s| s == "running completion"));
+        assert_eq!(h.state().js_console.log.iter().filter(|s| s.as_str() == "running completion").count(), 1);
+        assert_eq!(h.state().session.get(id).unwrap().form.iter().find(|f| f.name == "price").unwrap().value, ["99"]);
+    }
+
+    #[test]
+    fn hardening_running_first_menu_while_unfocused_or_blocked_is_cancelled() {
+        for scenario in ["focus", "palette"] {
+            let (mut h, complete, out) = hardening_running_job(false);
+            let id = h.state().views[0].id;
+            if scenario == "focus" {
+                h.input_mut().focused = false;
+                h.event(egui::Event::WindowFocused(false));
+            } else {
+                h.state_mut().palette_open = true;
+            }
+            let (reply, selected) = std::sync::mpsc::channel();
+            complete.send(InteractiveEvent::Menu(vec![entry("First", true, vec![])], reply)).unwrap();
+            h.run_steps(3);
+            assert_eq!(selected.recv_timeout(std::time::Duration::from_secs(1)).unwrap(), None);
+            complete.send(InteractiveEvent::Complete(out)).unwrap();
+            h.run_steps(4);
+            assert!(h.state().link_script.active.is_none());
+            assert!(h.state().link_script.retired.is_empty());
+            assert!(!h.state().js_console.log.iter().any(|s| s == "running completion"));
+            assert_eq!(h.state().session.get(id).unwrap().form.iter().find(|f| f.name == "price").unwrap().value, ["17"]);
+        }
+    }
+
+    #[test]
+    fn hardening_running_explicit_activation_still_supersedes_unchosen_action() {
+        let (mut h, complete, out) = hardening_running_job(false);
+        let id = h.state().views[0].id;
+        h.state_mut().run_link_script(id, 0, 0);
+        complete.send(InteractiveEvent::Complete(out)).unwrap();
+        wait(&mut h, |a| a.js_console.log.iter().any(|s| s == "running completion"));
+        h.run_steps(4);
+        assert_eq!(h.state().js_console.log.iter().filter(|s| s.as_str() == "running completion").count(), 1);
+        assert!(h.state().link_script.active.is_none());
+        assert!(h.state().link_script.retired.is_empty());
+        assert_eq!(h.state().session.get(id).unwrap().form.iter().find(|f| f.name == "price").unwrap().value, ["99"]);
+    }
+
     // Independent verification: controlled channels fix event order; real poll/show/retire/reap.
     fn remediation_controlled_job(
         h: &mut Harness<'static, PdfCraftApp>,

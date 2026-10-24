@@ -449,9 +449,13 @@ pub struct LinkScript {
 }
 
 impl LinkScript {
+    /// The source document captured at preparation, independent of the current UI view.
     pub fn document_id(&self) -> DocId {
         self.id
     }
+    /// Start a fresh worker from this snapshot; no document effects are applied here.
+    /// Reply to each menu (or drop its reply sender), then pass completion to
+    /// [`Session::finish_link_javascript`]. Closing the channel does not terminate the VM.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn start(&self) -> Result<std::sync::mpsc::Receiver<InteractiveEvent>, String> {
         pdfcraft_js::interactive(self.script.clone(), self.event.clone(), self.doc.clone(), self.fields.clone(), self.document_scripts.clone())
@@ -464,7 +468,8 @@ impl LinkScript {
 }
 
 impl Session {
-    /// Resolve a link by its raw zero-based annotation index, with the current visible page.
+    /// Resolve a link by its zero-based page and raw annotation index.
+    /// Capture fields, source identity and generation without running any script.
     pub fn prepare_link_javascript(&self, id: DocId, page: usize, index: usize) -> Result<LinkScript, EditError> {
         if !self.javascript() {
             return Err(EditError::Invalid("JavaScript is turned off".into()));
@@ -497,11 +502,15 @@ impl Session {
         })
     }
 
+    /// Whether this session still has the unchanged source document with JavaScript enabled.
+    /// Frontends separately check which document is active; view geometry is not engine state.
     pub fn link_javascript_is_current(&self, input: &LinkScript) -> bool {
         self.javascript() && self.get(input.id).is_some_and(|doc| doc.generation == input.generation)
     }
 
     /// Commit only to the unchanged source document and only while JavaScript is enabled.
+    /// Successful edits use the common permission-checked Undo batch. Failed scripts keep
+    /// their diagnostics but commit no edits or requests; callers dispatch returned requests.
     pub fn finish_link_javascript(&mut self, input: &LinkScript, mut out: Outcome) -> Result<Outcome, EditError> {
         if !self.javascript() {
             return Err(EditError::Invalid("JavaScript is turned off".into()));

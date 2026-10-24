@@ -1363,7 +1363,9 @@ pub struct MenuItem {
 
 /// UI rendezvous. Only the script worker waits for the reply.
 pub enum InteractiveEvent {
+    /// Suspend the worker until a validated leaf value, cancellation or reply timeout.
     Menu(Vec<MenuItem>, std::sync::mpsc::Sender<Option<String>>),
+    /// Final outcome; the host must revalidate its document before applying any effects.
     Complete(Outcome),
 }
 thread_local! {
@@ -1457,7 +1459,10 @@ fn open_doc(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValu
     Ok(JsValue::null())
 }
 
-/// Start a bounded script on a worker. Dropping the receiver cancels menu waits.
+/// Start a fresh script worker with the normal cooperative Boa and host limits.
+/// There is no hard wall-time/heap bound or admission limit for callers of this API.
+/// Dropping the receiver discards queued menus; an already received menu must be
+/// cancelled through its reply sender. Abandoning results does not terminate the VM.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn interactive(
     script: String,

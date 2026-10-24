@@ -1,6 +1,6 @@
 # PdfCraft roadmap
 
-> **Last updated:** 2026-10-24 · **Change:** minor (PR #2081 final review and menu keyboard routing; estimates unchanged)
+> **Last updated:** 2026-10-24 · **Change:** minor (PR #2081 running-action lifecycle hardening; estimates unchanged)
 **Stage: alpha** · next: beta, ~25% (ready for real work 50% → 75%) and ~400–700 h away
 
 > **Last reviewed:** 2026-10-22 · **Last updated:** 2026-10-22 · **Change:** minor (M14, #3558: rebase guarded macOS per-file association recovery onto current main; estimates unchanged)
@@ -191,6 +191,8 @@ Ranked; detail and the full milestone table in [docs/roadmap.md](docs/roadmap.md
 | 8 | 1.0 polish: performance, right-to-left, missing languages, keyboard-only (M14) | 55–95 |
 
 ## Progress log
+
+- **2026-10-24 (M6, PR #2081 running lifecycle):** Preserve running link-script completions through focus, view and outside interactions before their first menu; keep document invalidation and normal menu cancellation. Reproduce lost results and errors before correcting both UI passes. Estimates unchanged.
 
 - **2026-10-24 (M6, PR #2081 final review):** Reserve waiting-menu keys before document shortcuts, including the first arrow and Escape in full screen; retain outside command shortcuts. Synthetic regressions reproduce the first-arrow page change before the fix. Estimates unchanged.
 

@@ -49,9 +49,15 @@ Signature validation badge tips also remain available during a JavaScript menu i
 
 An outside press cancels a menu still awaiting a choice without consuming the pointer event:
 the canvas, another annotation or an interface control receives that same press/release.
+Before the first menu request, a running action also survives outside interaction, loss of
+focus, Escape, dialogs and view changes. These events have no menu to dismiss; normal
+document shortcuts remain available. A later menu starts a new wait using the current view
+and can still be cancelled normally, including while the window is unfocused or blocked.
 After a choice is accepted, the action keeps running through outside interaction, loss of focus,
 Escape and view changes. A new link activation waits for that accepted action; only the latest
 queued activation is retained, and it must still match its captured document generation to start.
+A new explicit activation may still supersede an unchosen action, including one still running
+before its first menu. This policy is separate from incidental view or focus changes.
 
 Cancelling a waiting menu, including a second popup in the same action, cancels the whole action.
 Every retired menu receives null; later menus are cancelled and completion is discarded, including
@@ -62,13 +68,13 @@ receivers are only drained, never applied. Each invocation retains its immutable
 and generation checks. Frame identity prevents multi-pass layout from starting an activation twice.
 
 At most three live execution channels are retained. If all slots are occupied, the latest
-activation waits for a bounded worker to finish. Logical polling does not paint or consume keys;
+activation waits for a worker to finish. Logical polling does not paint or consume keys;
 the UI pass alone draws and handles menu input. Before document shortcuts, a read-only
 ownership check reserves the waiting menu's arrows, Enter, Space and Escape, even before any
 item gains keyboard focus. Outside interactions retain their normal document shortcuts;
 menu cancellation observes raw events even when those shortcuts have consumed them.
 Closing/switching documents, editing or disabling
-JavaScript invalidates accepted results as well as waiting menus. While awaiting a choice, view
+JavaScript invalidates running and accepted results as well as waiting menus. While awaiting a choice, view
 changes, another dialog, loss of focus, outside scrolling, Tab and command shortcuts cancel the
 interaction. Menu scrolling stays inside the menu; outside events remain available to the reader.
 
@@ -87,6 +93,10 @@ Menus are limited to 1,024 entries, 16 submenu levels, 4,096 bytes per label/ret
 and 32 popup calls per action. Each reply wait expires after five minutes. Dropping the host
 or its reply channel releases a waiting worker. Existing Boa limits remain: one million
 loop iterations, recursion 256, bounded parser nesting, and a dedicated script stack.
+These are cooperative limits, not a general heap quota, hard wall-time deadline or ability
+to terminate a worker. The public worker API has no admission limit; the three-worker cap
+belongs to the desktop host. An already received menu must release its own reply sender
+or receive cancellation when its host abandons the action.
 Document initialization additionally permits at most 1,024 scripts totalling 1 MiB.
 These aggregate limits also apply to fields, buttons and the console. Refusal preserves the
 input value and reports a diagnostic to the host; field calculation does not open a modal alert.
@@ -148,6 +158,12 @@ cancellation, stale completions, bounded rapid activation, keyboard/submenus and
 without opening a target file. `PDFCRAFT_SHOT` and `PDFCRAFT_MENU_SHOTS` optionally save private
 synthetic test renders. The contributor reports successful Windows testing with a KiCad 10 PDF before the rebase.
 Headless renders do not replace native validation of the rebased build.
+
+Running-state regressions hold a real engine completion at the UI channel boundary, rather
+than timing a slow script. They check both logic and UI passes, delivery exactly once, one-step
+Undo, visible exceptions without edits or requests, first-menu transitions, document invalidation,
+channel cleanup and explicit activation supersession. The original tests fail on the uncorrected
+Running lifecycle before the phase guards are changed.
 
 The 2026-10-23 rebase passed 2,698 targeted tests. An isolated portable Windows run also
 verified annotation activation, the live JavaScript popup, the Next choice, navigation to page 2
