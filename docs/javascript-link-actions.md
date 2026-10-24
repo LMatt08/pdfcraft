@@ -25,6 +25,12 @@ that context under `Doc/Open`; the action then runs under `Link/Mouse Up`, with 
 equal to the document, `event.targetName` empty, and `pageNum` initially the link's page.
 The link event does not use `event.rc` as a cancellation result.
 
+An initializer that is refused or throws stops the Link action; its edits and external requests
+are not committed. Ordinary field, button and console initialization retains upstream's separate
+policy: document-script errors are reported while later initializers and the requested script
+can continue. All paths retain the aggregate initialization bound. When XFA layout owns the form,
+the upstream runner omits PDF fallback scripts from initialization; it keeps them in the file.
+
 `app.popUpMenuEx` sends a plain menu tree to the frontend and waits only on the worker thread.
 The frontend polls between frames and returns a selection or cancellation over a reply channel.
 The same Boa invocation resumes: no replay of the action, no source transformation and no
@@ -135,14 +141,20 @@ Named document scripts are initialized once per fresh context; globals are not p
 actions. Link initialization uses Doc/Open, then Link/Mouse Up with a document target. Existing
 field, button and console calls initialize under their actual event, without a synthetic Open.
 Field targets remain fields; legacy events without a target use null. The Link global event
-binding is non-enumerable so its document target does not make event serialization cyclic. Catalog OpenAction and document/page lifecycle
-actions, `/Next` action chains, other annotation triggers, named JavaScript destinations and
+binding is non-enumerable so its document target does not make event serialization cyclic.
+Catalog OpenAction JavaScript and document/page JavaScript lifecycle actions, `/Next` action
+chains, other annotation triggers, named JavaScript destinations and
 all other Acrobat APIs remain outside this implementation. `app.openDoc` returns `null`
 immediately, not a live Doc object: opening is deferred to consent, and subsequent script access
 to the opened document is unsupported. Hidden/password/options behavior is not emulated.
 Native link menus are supported on desktop; the web UI explicitly reports them unavailable.
 Existing synchronous console and button execution cancels popup requests instead of displaying
 the native link menu. These boundaries must not be represented as complete Acrobat compatibility.
+
+Ordinary PDF opening destinations, named destinations and `/XYZ` coordinate placement retain
+the upstream navigation behavior, including #4376. Reading an opening destination does not run
+an OpenAction script. Upstream additions such as `util.scand` and `app.execMenuItem` remain
+available; headless execution returns viewer requests as data without dispatching external I/O.
 
 ## Verification
 

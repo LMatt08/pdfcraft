@@ -358,6 +358,7 @@ impl PdfCraftApp {
                                             console: out.console,
                                             requests: out.requests,
                                             errors: out.error.into_iter().collect(),
+                                            doc_errors: out.doc_errors,
                                         },
                                     );
                                 }
