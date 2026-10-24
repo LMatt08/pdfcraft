@@ -1,6 +1,6 @@
 # PdfCraft roadmap
 
-> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (PR #2081 local upstream synchronization; estimates unchanged)
+> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (PR #2081: restrict implicit field OpenDoc requests; clarify headless popup cancellation and continuation; estimates unchanged)
 
 > **Last updated:** 2026-10-24 · **Change:** minor (PR #2081 running-action lifecycle hardening; estimates unchanged)
 **Stage: alpha** · next: beta, ~25% (ready for real work 50% → 75%) and ~400–700 h away
@@ -201,6 +201,8 @@ Ranked; detail and the full milestone table in [docs/roadmap.md](docs/roadmap.md
 | 8 | 1.0 polish: performance, right-to-left, missing languages, keyboard-only (M14) | 55–95 |
 
 ## Progress log
+
+- **2026-10-24 (M6, PR #2081 targeted corrections):** Reject document-opening requests from implicit field events with a diagnostic, preserve explicit actions and consent, and document headless null-menu continuation and Undo. Estimates unchanged.
 
 - **2026-10-24 (M6, PR #2081 running lifecycle):** Preserve running link-script completions through focus, view and outside interactions before their first menu; keep document invalidation and normal menu cancellation. Reproduce lost results and errors before correcting both UI passes. Estimates unchanged.
 - **2026-10-24 (M6, PR #2081 upstream synchronization):** Merge current main locally while retaining published history, native menu lifecycle, fail-closed Link initialization and documentation; preserve merged destination navigation and tolerant ordinary form initialization. Estimates unchanged.
@@ -687,6 +689,7 @@ Newest first: the date, what moved, and the new overall estimate.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | M6, PR #2081: filter implicit field document requests and clarify headless menu cancellation; preserve explicit actions, consent and Undo. Estimates unchanged. |
 | 2026-10-24 | minor | M6, PR #2081 local upstream synchronization: preserve published history, Link lifecycle/security contracts, merged navigation and ordinary form initialization. Estimates unchanged. |
 | 2026-10-24 | minor | M6, PR #2081 local audit remediation: accepted menu results, event compatibility, MCP metadata and bounded rejection cache. Estimates unchanged. |
 | 2026-10-23 | minor | M8, #3205 follow-up: phone-pattern redaction includes the +39 country code on labelled Italian geographic numbers with a slash; dates, protocol identifiers and whole-run guards remain. Estimates unchanged. |

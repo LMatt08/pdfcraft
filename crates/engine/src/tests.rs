@@ -8173,6 +8173,67 @@ fn a_fields_own_script_may_not_save_as_or_show_a_panel() {
     assert_eq!(o.requests, [js::Request::SaveAs]);
 }
 
+/// All four implicit field events reach the viewer-output boundary during a real edit.
+/// Opening another document is reserved for explicit actions; other requests and Undo survive.
+#[test]
+fn field_scripts_cannot_request_document_opening() {
+    let mut violations = Vec::new();
+    for (event, field) in [("calculate", "total"), ("format", "qty"), ("validate", "qty"), ("keystroke", "qty")] {
+        let mut s = Session::new().with_clock(|| 1_700_000_000);
+        let id = s.open("order.pdf", None, Arc::new(scripted_form()), None).unwrap();
+        s.apply(
+            id,
+            Edit::SetFieldScript {
+                name: field.into(),
+                event: event.into(),
+                script: Some("app.alert(event.name); console.println('field ran'); app.openDoc('other.pdf'); app.openDoc({cPath:'second.pdf'}); app.execMenuItem('SaveAs'); app.execMenuItem('ShowHideFileAttachment'); this.print(); app.launchURL('https://example.org'); this.pageNum=0;".into()),
+            },
+        )
+        .unwrap();
+        s.take_js_output(id);
+        let before: Vec<_> = s.get(id).unwrap().form.iter().map(|f| f.value.clone()).collect();
+        s.apply(id, Edit::SetFieldValue { name: "qty".into(), value: FieldValue::Text("4".into()) }).unwrap();
+        let out = s.take_js_output(id);
+        assert!(out.errors.is_empty(), "{event}: {out:?}");
+        assert!(out.alerts.iter().any(|a| a.eq_ignore_ascii_case(event)), "event must really run: {event}: {out:?}");
+        assert!(out.console.iter().any(|c| c == "field ran"), "{event}: {out:?}");
+        assert_eq!(s.get(id).unwrap().form.iter().find(|f| f.name == "qty").unwrap().value, ["4"]);
+        // Keep collecting so a red run proves reachability for every event, not just the first.
+        if out.requests != [js::Request::Print, js::Request::LaunchUrl("https://example.org".into()), js::Request::GoToPage(0)]
+            || out.console.iter().filter(|c| c.contains("opening documents requires an explicit action")).count() != 2
+        {
+            violations.push(format!("{event}: {out:?}"));
+        }
+        s.undo(id).unwrap();
+        assert_eq!(s.get(id).unwrap().form.iter().map(|f| f.value.clone()).collect::<Vec<_>>(), before, "{event}: one Undo restores the edit");
+        assert!(s.take_js_output(id).is_empty(), "Undo does not replay scripts");
+    }
+    assert!(violations.is_empty(), "implicit field requests reached the frontend queue:\n{}", violations.join("\n"));
+}
+
+#[test]
+fn explicit_button_document_requests_preserve_effects_and_undo() {
+    let mut s = Session::new().with_clock(|| 1_700_000_000);
+    let id = s.open("order.pdf", None, Arc::new(scripted_form()), None).unwrap();
+    s.take_js_output(id);
+    let out = s
+        .run_javascript(
+            id,
+            "getField('price').value='3'; app.openDoc({cPath:'other.pdf'}); app.execMenuItem('SaveAs'); app.execMenuItem('ShowHideFileAttachment');",
+            Some("go"),
+        )
+        .unwrap();
+    assert_eq!(out.error, None);
+    assert_eq!(out.requests, [js::Request::OpenDoc("other.pdf".into()), js::Request::SaveAs, js::Request::ShowPanel(js::Panel::Attachments)]);
+    assert_eq!(s.get(id).unwrap().form.iter().find(|f| f.name == "price").unwrap().value, ["3"]);
+    assert_eq!(s.get(id).unwrap().can_undo(), Some("Run JavaScript"));
+    s.take_js_output(id);
+    s.undo(id).unwrap();
+    assert_eq!(s.get(id).unwrap().form.iter().find(|f| f.name == "price").unwrap().value, ["2.5"]);
+    assert_eq!(s.get(id).unwrap().can_undo(), None);
+    assert!(s.take_js_output(id).is_empty());
+}
+
 /// A page whose forms go past the reading limit and whose picture goes past the image budget is
 /// listed once among the truncated pages.
 #[test]

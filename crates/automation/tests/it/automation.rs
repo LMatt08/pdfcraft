@@ -8912,6 +8912,38 @@ fn bookmark_list_reports_colour_and_style() {
 }
 
 #[test]
+fn headless_menu_cancellation_resumes_and_commits_with_one_undo() {
+    let dir = workdir("headless-menu-null");
+    let script = "var c=app.popUpMenuEx({cName:'Continue'}); console.println(c===null); getField('value').value='99'; app.openDoc('other.pdf');";
+    let original = String::from_utf8(remote_link_pdf(script, None)).unwrap();
+    let start = original.split("startxref\n").nth(1).unwrap().lines().next().unwrap().parse::<usize>().unwrap();
+    let text = original.replace("/S /GoToR /F", "/S /JavaScript /JS");
+    let delta = text.len() - original.len();
+    let bytes = text.replace(&format!("startxref\n{start}\n"), &format!("startxref\n{}\n", start + delta)).into_bytes();
+    std::fs::write(dir.join("js.pdf"), &bytes).unwrap();
+    let mut a = auto(&dir);
+    let id = ok(&mut a, "doc_open", json!({"path":"js.pdf"}))["doc"].clone();
+    ok(&mut a, "form_add_field", json!({"doc":id,"page":1,"type":"text","name":"value","rect":[20,100,160,130]}));
+    ok(&mut a, "form_fill", json!({"doc":id,"values":{"value":"17"}}));
+    for choices in [None, Some(json!([])), Some(json!([null]))] {
+        let mut args = json!({"doc":id,"page":1,"index":1});
+        if let Some(choices) = choices {
+            args["menu_choices"] = choices;
+        }
+        let out = ok(&mut a, "link_run_javascript", args.clone());
+        assert_eq!(out["error"], Value::Null, "{args}: {out}");
+        assert_eq!(out["console"], json!(["true"]), "the popup returns null: {out}");
+        assert_eq!(out["menus"].as_array().unwrap().len(), 1);
+        assert_eq!(out["requests"], json!([{"open_doc":"other.pdf","requires_permission":true}]));
+        assert_eq!(ok(&mut a, "form_fields", json!({"doc":id}))["fields"][0]["value"], "99", "execution continues after null");
+        ok(&mut a, "edit_undo", json!({"doc":id}));
+        assert_eq!(ok(&mut a, "form_fields", json!({"doc":id}))["fields"][0]["value"], "17", "one Undo restores the action");
+        assert!(!dir.join("other.pdf").exists(), "requests remain data requiring consent");
+    }
+    assert_eq!(std::fs::read(dir.join("js.pdf")).unwrap(), bytes);
+}
+
+#[test]
 fn link_javascript_tool_returns_menu_choice_navigation_and_permission_requests() {
     let dir = workdir("link-javascript");
     let script = "var c=app.popUpMenuEx.apply(app,[{cName:'Next',cReturn:'next'},{cName:'URL',cReturn:'url'},{cName:'File',cReturn:'file'}]); if(c==='next')this.pageNum=0; if(c==='url')app.launchURL('https://example.org'); if(c==='file')app.openDoc('other.pdf');";

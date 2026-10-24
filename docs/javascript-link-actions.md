@@ -114,6 +114,10 @@ relative paths. No file is read by Boa. Windows `/C/path` and `/C:/path` forms n
 `C:/path` before the existing local PDF resolver. URL and network paths remain rejected.
 Filesystem validation, PDF extension, regular-file, size and password checks still apply.
 Other filesystems or an `oDoc` base option are refused.
+Implicit field scripts (Calculate, Format, Validate and Keystroke), including their document
+initializers, cannot request opening another document: the engine drops `OpenDoc` requests
+and records a console diagnostic, as it already does for SaveAs and side-panel requests.
+Explicit Link and Button actions retain their document-opening requests and consent checks.
 
 The engine rechecks JavaScript enablement and the source generation before applying results.
 The frontend cancels a pending menu on document close, edits, undo/redo or JavaScript disablement.
@@ -125,8 +129,12 @@ commit form changes or dispatch its requests; its errors and diagnostic output r
 `link_run_javascript {doc, page, index, menu_choices?}` uses one-based `link_list` numbering.
 It returns `menus`, `alerts`, `console`, `requests`, and `error`. `menu_choices` is an optional
 array of `cReturn` strings or null, consumed in popup order, maximum 32 entries. Omitted choices
-cancel. Invalid selections fail closed. External URL/file requests are returned to the caller
-and never executed; consequently this tool does not read paths outside `--root`.
+or explicit null cancel only that popup and return JavaScript `null`. The script then resumes;
+it may change fields and issue viewer requests, and a successful completion applies its edits
+in the usual Undo batch. This differs from desktop cancellation of a waiting menu, which retires
+the whole action and discards its effects. Invalid selections fail closed. External URL/file
+requests are returned to the caller and never executed; consequently this tool does not read
+paths outside `--root`.
 The tool is marked destructive in MCP because scripts can change fields or reset the form.
 That hint does not grant permissions; the engine still checks all edits and batches them for Undo.
 
