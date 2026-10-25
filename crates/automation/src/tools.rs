@@ -674,7 +674,7 @@ pub fn tools() -> Vec<ToolDef> {
                 }),
                 &["doc", "page", "index"],
             )),
-        t("link_run_javascript", "Run link JavaScript", "Execute a link action with its document scripts and Link/Mouse Up event. Menus cancel by default; menu_choices supplies validated cReturn values in order. Returns requests for navigation, URLs and file opening; never performs external access.")
+        t("link_run_javascript", "Run link JavaScript", "Execute a link action with its document scripts and Link/Mouse Up event. Use the 1-based page and index returned by link_list (index is the position in that page's /Annots array, so gaps are possible). menu_choices supplies validated cReturn values in popup order; a missing or null choice cancels only that popup, resumes JavaScript with null and can still commit edits. Returns requests for navigation, URLs and file opening; never performs external access.")
             .destructive()
             .with(schema(json!({ "doc": doc(), "page": { "type": "integer", "minimum": 1 }, "index": { "type": "integer", "minimum": 1 }, "menu_choices": { "type": "array", "maxItems": 32, "items": { "type": ["string", "null"] } } }), &["doc", "page", "index"])),
         t("link_delete", "Delete a link", "Delete one link (page, index from link_list). Undoable.")

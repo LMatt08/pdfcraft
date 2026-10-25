@@ -631,13 +631,15 @@ fn date_format(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens) {
 impl PdfCraftApp {
     /// Resolve a script's local path without I/O and queue the existing consent prompt.
     /// Relative paths use the source document's path, with no working-directory fallback.
-    /// If another remote-link or link prompt is pending, ignore this request rather than
-    /// replacing it. Resolution failures are shown; accepting the prompt later schedules
-    /// normal file opening/validation. The web build reports this operation as unavailable.
+    /// If another remote-link or link prompt is pending, notify the user and ignore this
+    /// request rather than replacing it or queuing it. Resolution failures are shown;
+    /// accepting the prompt later schedules normal file opening/validation. The web build
+    /// reports this operation as unavailable.
     fn request_script_document(&mut self, id: DocId, file: String) {
         #[cfg(not(target_arch = "wasm32"))]
         {
             if self.pending_remote_link.is_some() || self.pending_link.is_some() {
+                self.notify_tr("Another link request is awaiting your permission. Respond to it, then try opening the document again.");
                 return;
             }
             let source_path = self.session.get(id).and_then(|d| d.path.as_deref()).map(std::path::Path::new);

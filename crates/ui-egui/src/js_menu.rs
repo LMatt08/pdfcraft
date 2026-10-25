@@ -739,6 +739,64 @@ mod tests {
         assert!(h.state().pending_remote_link.is_some());
         assert_eq!(h.state().views.len(), 1, "no file is read/opened before consent");
     }
+
+    #[test]
+    fn busy_script_document_request_notifies_without_replacing_pending_consent() {
+        let mut missing = Vec::new();
+        for (language, notice) in [
+            ("en", "Another link request is awaiting your permission. Respond to it, then try opening the document again."),
+            ("fr", "Une autre demande de lien attend votre autorisation. Répondez-y, puis réessayez d’ouvrir le document."),
+        ] {
+            for pending_file in [false, true] {
+                let mut h = harness();
+                h.state_mut().set_option("language", language).unwrap();
+                h.step();
+                let id = h.state().active_ids().unwrap().1;
+                let before = h.state().session.get(id).unwrap().bytes.clone();
+                if pending_file {
+                    h.state_mut().handle_js(
+                        id,
+                        pdfcraft_engine::js::JsOutput {
+                            requests: vec![pdfcraft_engine::js::Request::OpenDoc("C:/synthetic/first.pdf".into())],
+                            ..Default::default()
+                        },
+                    );
+                    assert!(h.state().pending_remote_link.is_some());
+                } else {
+                    h.state_mut().request_document_url("https://example.org/first", crate::LinkOrigin::Script);
+                    assert!(h.state().pending_link.is_some());
+                }
+                let file_before = h.state().pending_remote_link.clone();
+                let url_before = h.state().pending_link.clone();
+                h.state_mut().toast = None;
+                h.state_mut().handle_js(
+                    id,
+                    pdfcraft_engine::js::JsOutput {
+                        requests: vec![pdfcraft_engine::js::Request::OpenDoc("C:/synthetic/ignored.pdf".into())],
+                        ..Default::default()
+                    },
+                );
+                assert_eq!(h.state().pending_link, url_before);
+                match (&h.state().pending_remote_link, &file_before) {
+                    (Some(after), Some(before)) => {
+                        assert_eq!(after.source, before.source);
+                        assert_eq!(after.path, before.path);
+                        assert!(matches!(after.destination, pdfcraft_render::RemoteDestination::Default));
+                    }
+                    (None, None) => {}
+                    other => panic!("pending file consent changed: {other:?}"),
+                }
+                assert_eq!(h.state().views.len(), 1, "the rejected request opens no document");
+                assert!(h.state().pending_opens.is_empty());
+                assert_eq!(h.state().session.get(id).unwrap().bytes, before);
+                assert!(!h.state().session.get(id).unwrap().dirty);
+                if h.state().toast.as_ref().map(|(text, _)| text.as_str()) != Some(notice) {
+                    missing.push(format!("{language}, pending_file={pending_file}: {:?}", h.state().toast));
+                }
+            }
+        }
+        assert!(missing.is_empty(), "a busy OpenDoc was silently ignored:\n{}", missing.join("\n"));
+    }
     #[test]
     fn disabling_javascript_cancels_a_waiting_menu() {
         let mut h = harness();

@@ -114,6 +114,9 @@ relative paths. No file is read by Boa. Windows `/C/path` and `/C:/path` forms n
 `C:/path` before the existing local PDF resolver. URL and network paths remain rejected.
 Filesystem validation, PDF extension, regular-file, size and password checks still apply.
 Other filesystems or an `oDoc` base option are refused.
+On desktop, if a file-opening or URL consent prompt is already pending, another script document-opening
+request is ignored with a translated notification asking the user to respond first and retry.
+The existing prompt is preserved; the ignored request is not queued and no file is opened.
 Implicit field scripts (Calculate, Format, Validate and Keystroke), including their document
 initializers, cannot request opening another document: the engine drops `OpenDoc` requests
 and records a console diagnostic, as it already does for SaveAs and side-panel requests.
@@ -127,6 +130,8 @@ commit form changes or dispatch its requests; its errors and diagnostic output r
 ## Headless access
 
 `link_run_javascript {doc, page, index, menu_choices?}` uses one-based `link_list` numbering.
+Pass the exact `page` and `index` returned by `link_list`: `index` is the position in that
+page's `/Annots` array, not a row number in a filtered list of links; gaps are possible.
 It returns `menus`, `alerts`, `console`, `requests`, and `error`. `menu_choices` is an optional
 array of `cReturn` strings or null, consumed in popup order, maximum 32 entries. Omitted choices
 or explicit null cancel only that popup and return JavaScript `null`. The script then resumes;
